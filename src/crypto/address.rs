@@ -257,17 +257,36 @@ mod tests {
 
     #[test]
     fn parse_rejects_mixed_case() {
-        // bech32 is specified as lowercase-only for TFS addresses.
-        // The bech32 crate rejects mixed case by default.
+        // bech32 is specified as single-case. Mixed case (some upper, some
+        // lower) is invalid per BIP-173 and must be rejected.
+        //
+        // NOTE: we must uppercase a LETTER, not a digit. The bech32 alphabet
+        // includes digits (0, 2-9), which have no case distinction, so
+        // uppercasing a digit leaves it unchanged and the test would become
+        // flaky. We find the first letter after the separator and uppercase
+        // that, guaranteeing a genuine case change.
         let kp = Keypair::generate();
         let a = Address::from_public_key(&kp.public_key());
         let encoded = a.to_bech32();
-        // Mangle by uppercasing a character in the middle.
-        let half = encoded.len() / 2;
+
+        let sep_pos = encoded.find('1').expect("bech32 has separator");
+        let target_pos = encoded[sep_pos + 1..]
+            .char_indices()
+            .find(|(_, c)| c.is_ascii_alphabetic())
+            .map(|(i, _)| sep_pos + 1 + i)
+            .expect("address must contain at least one letter after the separator");
+
         let mut chars: Vec<char> = encoded.chars().collect();
-        chars[half] = chars[half].to_ascii_uppercase();
+        chars[target_pos] = chars[target_pos].to_ascii_uppercase();
         let mangled: String = chars.into_iter().collect();
-        assert!(Address::parse(&mangled).is_err());
+
+        // Sanity check: we must have actually changed something.
+        assert_ne!(mangled, encoded, "test setup failure: no case change occurred");
+
+        assert!(
+            Address::parse(&mangled).is_err(),
+            "mixed-case address should be rejected: {mangled}"
+        );
     }
 
     #[test]

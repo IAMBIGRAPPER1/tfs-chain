@@ -56,8 +56,10 @@
 // Layer 1 · Cryptographic Foundation
 pub mod crypto;
 
-// Layers 2–7 · pending Dragon Runs before they land
-// pub mod block;
+// Layer 2 · The Block
+pub mod block;
+
+// Layers 3–7 · pending Dragon Runs before they land
 // pub mod tx;
 // pub mod mines_script;
 // pub mod chain;

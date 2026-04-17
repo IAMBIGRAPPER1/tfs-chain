@@ -17,7 +17,7 @@ Seven layers. Each a sovereign seal. Each passes a Dragon Run before the next be
 | Layer | Module | Status |
 |------:|---|---|
 | 1 | **Cryptographic Foundation** — ed25519 + BLAKE3 + bech32m | 🐉 SEALED |
-| 2 | **The Block** — the atom of the chain | pending |
+| 2 | **The Block** — header · Merkle tree · validation | 🐉 SEALED |
 | 3 | **Transactions** — transfer · inscribe · verify · burn | pending |
 | 4 | **MINES.script** — the doctrine-block DSL | pending |
 | 5 | **Chain Logic** — append-only validation · mempool · BFT consensus | pending |
