@@ -240,7 +240,12 @@ impl NodeHandle {
 
             GossipMessage::Proposal(block) => {
                 let now_ms = now_ms();
-                // Cache the proposal.
+                // Cache the proposal ONLY if it's for the immediate-next height.
+                // Rejecting far-future heights here prevents an unbounded-memory
+                // DoS where a malicious peer gossips proposals at arbitrarily
+                // large heights and we'd cache them all waiting to commit.
+                //
+                // Cross-layer defense (Final Dragon Run advisory).
                 let block_hash = match block.hash() {
                     Ok(h) => h,
                     Err(e) => {
@@ -248,6 +253,18 @@ impl NodeHandle {
                         return;
                     }
                 };
+                {
+                    let guard = self.state.read().await;
+                    let expected = guard.chain.height().saturating_add(1);
+                    if block.header.height != expected {
+                        tracing::debug!(
+                            got = block.header.height,
+                            expected,
+                            "dropping proposal for non-next height"
+                        );
+                        return;
+                    }
+                }
                 {
                     let mut guard = self.state.write().await;
                     guard
