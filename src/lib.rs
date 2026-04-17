@@ -79,8 +79,10 @@ pub mod storage;
 #[cfg(feature = "storage")]
 pub mod persistent_chain;
 
-// Layer 7 · pending Dragon Runs before it lands
-// pub mod node;
+// Layer 7 · Node (HTTP API + libp2p gossip + consensus driver)
+// Gated behind the `node` feature; requires `storage` as well.
+#[cfg(feature = "node")]
+pub mod node;
 
 /// The protocol version. Incremented only by constitutional act of PRESIDENT MINES.
 pub const PROTOCOL_VERSION: u32 = 1;

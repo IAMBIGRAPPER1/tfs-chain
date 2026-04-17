@@ -122,11 +122,14 @@ libp2p = { version = "0.54.1", features = [
 ], optional = true }
 tracing = { version = "0.1.41", optional = true }
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"], optional = true }
+futures = { version = "0.3.31", optional = true }
 
 [features]
 default = []
 storage = ["dep:rocksdb"]
+# node implies storage — the node daemon persists via Layer 6.
 node = [
+  "storage",
   "dep:tokio",
   "dep:axum",
   "dep:tower",
@@ -134,6 +137,7 @@ node = [
   "dep:libp2p",
   "dep:tracing",
   "dep:tracing-subscriber",
+  "dep:futures",
 ]
 full = ["storage", "node"]
 

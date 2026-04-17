@@ -3423,6 +3423,7 @@ dependencies = [
  "chrono",
  "criterion",
  "ed25519-dalek",
+ "futures",
  "hex",
  "libp2p",
  "proptest",
