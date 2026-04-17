@@ -72,8 +72,14 @@ pub mod consensus;
 pub mod chain;
 pub mod genesis;
 
-// Layers 6–7 · pending Dragon Runs before they land
-// pub mod storage;
+// Layer 6 · Persistent Storage — gated behind the `storage` feature
+#[cfg(feature = "storage")]
+pub mod storage;
+
+#[cfg(feature = "storage")]
+pub mod persistent_chain;
+
+// Layer 7 · pending Dragon Runs before it lands
 // pub mod node;
 
 /// The protocol version. Incremented only by constitutional act of PRESIDENT MINES.

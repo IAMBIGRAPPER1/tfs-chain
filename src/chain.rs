@@ -135,6 +135,35 @@ impl Chain {
         })
     }
 
+    /// Rebuild an in-memory [`Chain`] from disk-authoritative parts.
+    ///
+    /// This is used by [`crate::persistent_chain::PersistentChain`] after
+    /// loading state and the tip block from RocksDB at boot. The in-memory
+    /// chain holds ONLY the tip in the `blocks` vector — historical blocks
+    /// remain on disk and are fetched on demand via the storage layer.
+    ///
+    /// # Invariants (caller's responsibility)
+    /// - `state.height == tip.block.header.height`
+    /// - `state.last_block_hash == tip.block.hash()`
+    /// - `tip.qc` was already verified against `validators` at commit-time
+    ///
+    /// Skipping re-verification here is safe because the disk is trusted
+    /// (it's our own persistent store, not peer input).
+    #[must_use]
+    pub fn restore_from_parts(
+        chain_id: String,
+        validators: ValidatorSet,
+        tip: CommittedBlock,
+        state: State,
+    ) -> Self {
+        Self {
+            chain_id,
+            validators,
+            blocks: vec![tip],
+            state,
+        }
+    }
+
     /// Append the next committed block on top of the current tip.
     ///
     /// # Errors
