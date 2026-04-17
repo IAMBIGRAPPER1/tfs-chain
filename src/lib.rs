@@ -59,8 +59,11 @@ pub mod crypto;
 // Layer 2 · The Block
 pub mod block;
 
-// Layers 3–7 · pending Dragon Runs before they land
-// pub mod tx;
+// Layer 3 · Transactions
+pub mod tx;
+
+// Layers 4–7 · pending Dragon Runs before they land
+// pub mod mines_script;
 // pub mod mines_script;
 // pub mod chain;
 // pub mod consensus;
