@@ -1,0 +1,70 @@
+# ═══════════════════════════════════════════════════════════════════
+# TFS_CHAIN · GITIGNORE
+# MINES. VENTURE, LLC · IAMBIGRAPPER1 · ALL RIGHTS MINES.
+# ═══════════════════════════════════════════════════════════════════
+#
+# What stays OUT of the public repo:
+#   - Rust build artifacts (multi-GB, regenerable)
+#   - IDE / editor junk
+#   - Environment secrets
+#   - Cryptographic key material (NEVER commit keys)
+#   - Running chain state (RocksDB data)
+#   - OS-specific files
+#
+# What stays IN:
+#   - All .rs source files
+#   - Cargo.toml (locked deps)
+#   - Cargo.lock (for reproducible builds of the binary)
+#   - Documentation, tests, scrolls
+#
+# Remember: the CODE is public. The KEYS are sovereign. Never confuse them.
+
+# ─── Rust build artifacts ───────────────────────────────────────────
+/target/
+**/*.rs.bk
+*.pdb
+
+# ─── Cryptographic key material · NEVER COMMIT ──────────────────────
+*.key
+*.pem
+*.priv
+*.secret
+*.seed
+keys/
+keystore/
+/validator-keys/
+president-mines.key
+genesis-keypair.json
+
+# ─── Environment + secrets ──────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env.local
+secrets/
+*.secrets
+
+# ─── Chain state (regenerable, huge, contains validator data) ──────
+data/
+chaindata/
+db/
+/blocks/
+*.rocksdb
+*.sst
+*.log
+
+# ─── IDE / editor ───────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ─── OS ─────────────────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+
+# ─── Dragon Run artifacts (working notes, not committed) ────────────
+/dragon-runs/scratch/
+*.dragonrun.tmp

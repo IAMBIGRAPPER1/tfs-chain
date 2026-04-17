@@ -1,0 +1,182 @@
+# TFS_CHAIN — THE SOVEREIGN MYCELIAL CRYPTO LEDGER
+# MINES. VENTURE, LLC · IAMBIGRAPPER1 · ALL RIGHTS MINES.
+#
+# Dependencies are LOCKED to exact versions. No ^, no ~, no auto-updates.
+# Every dependency is battle-tested. No experimental cryptography.
+# Every version bump is a Dragon Run event.
+
+[package]
+name = "tfs_chain"
+version = "0.1.0"
+edition = "2021"
+authors = ["PRESIDENT MINES. <iambigrapper1@minesventure.llc>"]
+description = "The sovereign mycelial crypto ledger of THE FINAL SERVER"
+license = "All Rights MINES."
+repository = "https://thefinalserver.com"
+
+[lib]
+name = "tfs_chain"
+path = "src/lib.rs"
+
+[[bin]]
+name = "tfs-node"
+path = "src/main.rs"
+
+# ════════════════════════════════════════════════════════════════════
+# DEPENDENCIES
+# ════════════════════════════════════════════════════════════════════
+
+[dependencies]
+
+# ────────────────────────────────────────────────────────────────────
+# CRYPTOGRAPHIC PRIMITIVES (Layer 1)
+# ────────────────────────────────────────────────────────────────────
+
+# ed25519-dalek — signing + verification
+# Industry-standard elliptic curve, constant-time operations, zeroizing.
+# What Solana, Near, most modern sovereign chains use.
+ed25519-dalek = { version = "2.1.1", features = ["rand_core", "zeroize"] }
+
+# BLAKE3 — hashing
+# Faster than SHA-256, equally secure, modern.
+# Keyed hashing, derive_key, and XOF modes all available.
+blake3 = "1.5.4"
+
+# bech32 — address encoding
+# Human-readable, checksummed, Bitcoin-standard for SegWit addresses.
+# Our addresses look like: tfs1abcdef...
+bech32 = "0.11.0"
+
+# rand — cryptographically secure random number generation
+# Used for keypair generation. Backed by OsRng on every platform.
+rand = "0.8.5"
+
+# zeroize — secure memory wiping
+# Private keys get zeroed on drop. Defense against cold-boot attacks.
+zeroize = { version = "1.8.1", features = ["derive"] }
+
+# subtle — constant-time comparisons
+# Prevents timing-attack leaks when comparing secrets.
+subtle = "2.6.1"
+
+# ────────────────────────────────────────────────────────────────────
+# SERIALIZATION (used across all layers)
+# ────────────────────────────────────────────────────────────────────
+
+# Serde — the Rust serialization framework
+serde = { version = "1.0.215", features = ["derive"] }
+serde_json = "1.0.133"
+
+# Bincode — compact binary serialization for chain storage
+# Deterministic encoding, essential for reproducible block hashes.
+bincode = "1.3.3"
+
+# Hex — hex encoding for display/debug
+hex = "0.4.3"
+
+# ────────────────────────────────────────────────────────────────────
+# ERROR HANDLING
+# ────────────────────────────────────────────────────────────────────
+
+# thiserror — structured error types for the library
+thiserror = "1.0.69"
+
+# anyhow — error handling for the binary (main.rs)
+anyhow = "1.0.93"
+
+# ────────────────────────────────────────────────────────────────────
+# TIME (Layer 2+)
+# ────────────────────────────────────────────────────────────────────
+
+chrono = { version = "0.4.38", features = ["serde"] }
+
+# ────────────────────────────────────────────────────────────────────
+# LAYERS 6 + 7 DEPENDENCIES ARE GATED UNTIL THEIR LAYER IS BUILT
+#
+# The crate compiles cleanly with only Layer 1-5 dependencies active.
+# When we build Layer 6 (storage), we enable the `storage` feature.
+# When we build Layer 7 (node), we enable the `node` feature.
+#
+# This keeps Dragon Runs focused on code that actually exists, and keeps
+# the build fast while early layers are being written.
+# ────────────────────────────────────────────────────────────────────
+
+# Layer 6 — persistent storage
+rocksdb = { version = "0.22.0", optional = true }
+
+# Layer 7 — async runtime + networking + logging
+tokio = { version = "1.42.0", features = ["full"], optional = true }
+axum = { version = "0.7.9", optional = true }
+tower = { version = "0.5.1", optional = true }
+tower-http = { version = "0.6.2", features = ["cors", "trace"], optional = true }
+libp2p = { version = "0.54.1", features = [
+  "tokio",
+  "tcp",
+  "noise",
+  "yamux",
+  "gossipsub",
+  "identify",
+  "kad",
+  "mdns",
+  "macros",
+], optional = true }
+tracing = { version = "0.1.41", optional = true }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"], optional = true }
+
+[features]
+default = []
+storage = ["dep:rocksdb"]
+node = [
+  "dep:tokio",
+  "dep:axum",
+  "dep:tower",
+  "dep:tower-http",
+  "dep:libp2p",
+  "dep:tracing",
+  "dep:tracing-subscriber",
+]
+full = ["storage", "node"]
+
+# ────────────────────────────────────────────────────────────────────
+# DEV DEPENDENCIES (tests + benchmarks only)
+# ────────────────────────────────────────────────────────────────────
+
+[dev-dependencies]
+proptest = "1.6.0"        # property-based testing for consensus invariants
+criterion = "0.5.1"       # benchmarking
+tempfile = "3.14.0"       # temp directories for storage tests
+
+# ────────────────────────────────────────────────────────────────────
+# BUILD PROFILES
+# ────────────────────────────────────────────────────────────────────
+
+[profile.release]
+opt-level = 3
+lto = "fat"              # link-time optimization — slower build, faster binary
+codegen-units = 1        # single codegen unit for maximum optimization
+panic = "abort"          # abort on panic — smaller binary, no unwinding
+strip = "symbols"        # strip debug symbols from the release binary
+overflow-checks = true   # KEEP overflow checks ON in release — we are a chain, not a game
+
+[profile.dev]
+opt-level = 0
+debug = true
+overflow-checks = true
+
+# ────────────────────────────────────────────────────────────────────
+# LINT POLICY (enforced at compile time)
+# ────────────────────────────────────────────────────────────────────
+
+[lints.rust]
+unsafe_code = "forbid"               # NO unsafe Rust anywhere in this crate
+missing_docs = "warn"                # every public item must be documented
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+unwrap_used = "warn"                 # no .unwrap() in library code
+expect_used = "warn"                 # no .expect() in library code
+panic = "warn"                       # no explicit panic! in library code
+indexing_slicing = "warn"            # no arr[i] without bounds check
+integer_division = "warn"            # suspicious integer division
+float_arithmetic = "forbid"          # NO floating point in consensus-critical code
