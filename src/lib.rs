@@ -62,8 +62,10 @@ pub mod block;
 // Layer 3 · Transactions
 pub mod tx;
 
-// Layers 4–7 · pending Dragon Runs before they land
-// pub mod mines_script;
+// Layer 4 · MINES.script — the doctrine-block DSL
+pub mod mines_script;
+
+// Layers 5–7 · pending Dragon Runs before they land
 // pub mod mines_script;
 // pub mod chain;
 // pub mod consensus;
