@@ -54,6 +54,7 @@ mod cli {
             "keygen" => cmd_keygen(),
             "init" => cmd_init(&args[2..]).await,
             "run" => cmd_run(&args[2..]).await,
+            "tx" => cmd_tx(&args[2..]).await,
             "help" | "--help" | "-h" => {
                 print_banner();
                 print_help();
@@ -84,7 +85,7 @@ mod cli {
         println!("                [--chain-id <id>]");
         println!("  tfs-node run  --data-dir <dir> [--validator-key <hex>]");
         println!("                [--http <host:port>] [--p2p <multiaddr>]");
-        println!("                [--bootstrap <multiaddr>]...");
+        println!("                [--bootstrap <multiaddr>]... [--network-seed <hex>]");
         println!();
         println!("ALL RIGHTS MINES.");
     }
@@ -147,7 +148,13 @@ mod cli {
             inscriber: Keypair::from_secret_bytes(&my_kp.secret_bytes()),
         };
 
-        let config = NodeConfig::new(&data_dir, &chain_id).with_validator_key(my_kp);
+        let mut config = NodeConfig::new(&data_dir, &chain_id).with_validator_key(my_kp);
+        if let Some(http) = flag(args, "--http") {
+            config = config.with_http_listen(http.parse().context("bad --http")?);
+        }
+        if let Some(p2p) = flag(args, "--p2p") {
+            config = config.with_p2p_listen(p2p);
+        }
         let handle = Node::spawn(config, Some(bootstrap)).await?;
         println!();
         println!("✅ Genesis minted at height 0.");
@@ -179,12 +186,87 @@ mod cli {
             let kp = parse_keypair_hex(&vhex)?;
             config = config.with_validator_key(kp);
         }
+        if let Some(seed_hex) = flag(args, "--network-seed") {
+            let bytes = hex::decode(&seed_hex).context("bad --network-seed hex")?;
+            if bytes.len() != 32 {
+                return Err(anyhow!(
+                    "--network-seed must be 32 bytes (64 hex chars), got {}",
+                    bytes.len()
+                ));
+            }
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&bytes);
+            config = config.with_network_key_seed(arr);
+        }
 
         let handle = Node::spawn(config, None).await?;
         println!("◈ tfs-node running");
         println!("   HTTP:    http://{}", handle.http_addr);
         println!("   peer id: {}", handle.local_peer_id);
         handle.run_until_shutdown().await;
+        Ok(())
+    }
+
+    async fn cmd_tx(args: &[String]) -> Result<()> {
+        use tfs_chain::crypto::address::Address;
+        use tfs_chain::tx::{SignedTransaction, Transaction, TransferPayload};
+
+        let from_hex = flag(args, "--from-key").context("missing --from-key")?;
+        let to_bech32 = flag(args, "--to").context("missing --to")?;
+        let amount_str = flag(args, "--amount").context("missing --amount (hyphae)")?;
+        let nonce_str = flag(args, "--nonce").context("missing --nonce")?;
+        let rpc = flag(args, "--rpc").unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
+
+        let from_kp = parse_keypair_hex(&from_hex)?;
+        let from_addr = Address::from_public_key(&from_kp.public_key());
+        let to_addr = Address::parse(&to_bech32).map_err(|e| anyhow!("bad --to: {e}"))?;
+        let amount: u64 = amount_str.parse().context("bad --amount")?;
+        let nonce: u64 = nonce_str.parse().context("bad --nonce")?;
+
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let ts = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis(),
+        )
+        .unwrap_or(i64::MAX);
+
+        let stx = SignedTransaction::sign_single(
+            Transaction::Transfer(TransferPayload {
+                from: from_addr,
+                to: to_addr,
+                amount_hyphae: amount,
+                nonce,
+                timestamp_ms: ts,
+            }),
+            &from_kp,
+        )
+        .map_err(|e| anyhow!("sign: {e}"))?;
+
+        let bytes = stx.to_bytes().map_err(|e| anyhow!("encode: {e}"))?;
+        let tx_id = stx.tx_id().map_err(|e| anyhow!("tx_id: {e}"))?;
+
+        // POST to /tx as raw bincode bytes.
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{rpc}/tx"))
+            .header("content-type", "application/octet-stream")
+            .body(bytes)
+            .send()
+            .await
+            .context("rpc call")?;
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            println!("✅ tx submitted");
+            println!("   tx_id: {}", tx_id.to_hex());
+            println!("   resp:  {body}");
+        } else {
+            println!("❌ tx rejected ({status})");
+            println!("   resp: {body}");
+            return Err(anyhow!("tx submission failed"));
+        }
         Ok(())
     }
 

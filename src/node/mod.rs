@@ -96,6 +96,12 @@ pub struct NodeState {
     /// Needed so that when a QC forms from incoming votes, we can pair
     /// it with its block.
     pub pending_proposals: BTreeMap<(u64, Hash), Block>,
+
+    /// Our own votes indexed by height. Used to re-broadcast on each
+    /// proposer tick in case the initial publish lost a race with the
+    /// gossip mesh formation (InsufficientPeers failure). Cleaned when
+    /// the corresponding height commits.
+    pub our_votes: BTreeMap<u64, Vote>,
 }
 
 /// Convenience alias for the full node state shared across HTTP, P2P,
@@ -173,40 +179,79 @@ impl NodeHandle {
         }
     }
 
-    /// Called on each proposer tick. If we're the leader for the next
-    /// height, build a proposal and broadcast it.
+    /// Called on each proposer tick.
+    ///
+    /// Three jobs, all idempotent:
+    /// 1. If we're the leader for next-height and haven't proposed yet,
+    ///    build + cache a proposal. Otherwise re-use our cached one.
+    /// 2. (Re-)broadcast that proposal on every tick. Gossipsub dedups
+    ///    by content hash so this is cheap for peers who already have it.
+    /// 3. (Re-)broadcast our own vote at next-height if we've cast one.
+    ///    Critical on boot: the initial publish can fail with
+    ///    InsufficientPeers before the gossip mesh forms. Ticks retry.
     async fn proposer_tick(&mut self) -> Result<(), NodeError> {
         let Some(kp) = &self.validator_key else {
             return Ok(());
         };
         let now_ms = now_ms();
+        let my_pk = kp.public_key();
 
-        let maybe_proposal = {
+        let next_height = {
             let guard = self.state.read().await;
-            try_propose_block(
-                &guard.chain,
-                &guard.mempool,
-                kp,
-                now_ms,
-                crate::block::MAX_TXS_PER_BLOCK,
-            )
-            .map_err(NodeError::Proposer)?
+            guard.chain.height().saturating_add(1)
         };
 
-        if let Some(block) = maybe_proposal {
-            // Cache the proposal so we can pair it with votes later.
-            let block_hash = block.hash().map_err(|e| NodeError::Block(Box::new(e)))?;
-            {
-                let mut guard = self.state.write().await;
-                guard
-                    .pending_proposals
-                    .insert((block.header.height, block_hash), block.clone());
-            }
-            // Broadcast proposal.
-            self.publish(GossipMessage::Proposal(block.clone())).await;
+        // --- JOB 1 & 2: Proposal (create-if-needed, then republish) ---
+        let existing_proposal: Option<Block> = {
+            let guard = self.state.read().await;
+            guard
+                .pending_proposals
+                .iter()
+                .find(|((h, _), blk)| *h == next_height && blk.header.proposer == my_pk)
+                .map(|(_, blk)| blk.clone())
+        };
 
-            // We also vote on our own proposal (pretend we just received it).
+        let our_block: Option<Block> = if let Some(blk) = existing_proposal {
+            Some(blk)
+        } else {
+            let maybe = {
+                let guard = self.state.read().await;
+                try_propose_block(
+                    &guard.chain,
+                    &guard.mempool,
+                    kp,
+                    now_ms,
+                    crate::block::MAX_TXS_PER_BLOCK,
+                )
+                .map_err(NodeError::Proposer)?
+            };
+            if let Some(block) = maybe {
+                let block_hash = block.hash().map_err(|e| NodeError::Block(Box::new(e)))?;
+                {
+                    let mut guard = self.state.write().await;
+                    guard
+                        .pending_proposals
+                        .insert((block.header.height, block_hash), block.clone());
+                }
+                Some(block)
+            } else {
+                None
+            }
+        };
+
+        if let Some(block) = our_block {
+            self.publish(GossipMessage::Proposal(block.clone())).await;
+            // vote_on_proposal is idempotent via the stubborn-voting guard.
             self.vote_on_proposal(block, now_ms).await;
+        }
+
+        // --- JOB 3: Re-broadcast our vote ---
+        let our_vote: Option<Vote> = {
+            let guard = self.state.read().await;
+            guard.our_votes.get(&next_height).cloned()
+        };
+        if let Some(vote) = our_vote {
+            self.publish(GossipMessage::Vote(vote)).await;
         }
 
         Ok(())
@@ -318,6 +363,21 @@ impl NodeHandle {
         let Some(kp) = &self.validator_key else {
             return; // Not a validator — don't vote.
         };
+
+        // STUBBORN VOTING: if we've already voted at this height for
+        // ANY block, don't vote again. Voting for a second proposal at
+        // the same height would be self-equivocation — the engine would
+        // reject it, and meanwhile we'd have gossiped a conflicting
+        // vote. Better to stick with our first seen proposal.
+        let already_voted_at_height = {
+            let guard = self.state.read().await;
+            let my_pk = kp.public_key();
+            guard.consensus.has_voted_at(block.header.height, &my_pk)
+        };
+        if already_voted_at_height {
+            return;
+        }
+
         let vote = {
             let guard = self.state.read().await;
             match consider_proposal(&guard.chain, &block, kp, now_ms) {
@@ -329,12 +389,13 @@ impl NodeHandle {
                 }
             }
         };
-        // Record our own vote.
+        // Record our own vote + cache it for rebroadcast.
         {
             let mut guard = self.state.write().await;
             if let Err(e) = guard.consensus.record_vote(vote.clone()) {
                 tracing::debug!(error = %e, "self-vote rejected by engine");
             }
+            guard.our_votes.insert(vote.height, vote.clone());
         }
         // Check if our own vote formed a quorum (small N: quite likely).
         let maybe_committed = {
@@ -396,6 +457,7 @@ impl NodeHandle {
                 guard
                     .pending_proposals
                     .retain(|&(h, _), _| h > cb_height);
+                guard.our_votes.retain(|&h, _| h > cb_height);
                 tracing::info!(height = cb_height, "committed block");
                 true
             }
@@ -477,6 +539,7 @@ impl Node {
             mempool,
             consensus,
             pending_proposals: BTreeMap::new(),
+            our_votes: BTreeMap::new(),
         }));
 
         // 3. Spawn P2P.

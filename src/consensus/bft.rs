@@ -223,6 +223,16 @@ impl ConsensusEngine {
     pub fn equivocators_at(&self, height: u64) -> Vec<PublicKey> {
         self.equivocators.get(&height).cloned().unwrap_or_default()
     }
+
+    /// True if the given validator has recorded any vote at `height`.
+    ///
+    /// Used by the Node layer to implement stubborn voting (vote once per
+    /// height, don't switch even if a new proposal arrives).
+    #[must_use]
+    pub fn has_voted_at(&self, height: u64, validator: &PublicKey) -> bool {
+        self.first_vote_at_height
+            .contains_key(&(height, validator.clone()))
+    }
 }
 
 /// Outcome of [`ConsensusEngine::record_vote`].

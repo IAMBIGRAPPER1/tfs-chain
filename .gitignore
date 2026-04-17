@@ -68,3 +68,4 @@ Desktop.ini
 # ─── Dragon Run artifacts (working notes, not committed) ────────────
 /dragon-runs/scratch/
 *.dragonrun.tmp
+testnet/

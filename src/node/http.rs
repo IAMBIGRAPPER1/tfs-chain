@@ -441,6 +441,7 @@ mod tests {
             mempool: Mempool::default(),
             consensus,
             pending_proposals: BTreeMap::new(),
+            our_votes: BTreeMap::new(),
         }));
         (node_state, president, dir)
     }
