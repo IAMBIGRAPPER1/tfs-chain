@@ -55,6 +55,7 @@ use axum::{
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use tower_http::cors::{Any, CorsLayer};
 
 use crate::crypto::address::Address;
 use crate::crypto::hash::Hash;
@@ -111,6 +112,28 @@ pub struct TxLocationResponse {
     pub tx_index: u32,
 }
 
+/// `GET /block/{height}/summary` response body — JSON-friendly subset
+/// of a committed block for UI display.
+#[derive(Serialize, Deserialize)]
+pub struct BlockSummaryResponse {
+    /// Block height.
+    pub height: u64,
+    /// Hex-encoded block hash.
+    pub block_hash: String,
+    /// Hex-encoded previous-block hash.
+    pub previous_hash: String,
+    /// Unix ms timestamp of the block.
+    pub timestamp_ms: i64,
+    /// Hex-encoded proposer public key.
+    pub proposer_hex: String,
+    /// Hex-encoded tx Merkle root.
+    pub tx_merkle_root: String,
+    /// Number of transactions in the block.
+    pub tx_count: u64,
+    /// Number of vote signatures in the QC.
+    pub qc_vote_count: u64,
+}
+
 /// `GET /address/{bech32}` response body.
 #[derive(Serialize, Deserialize)]
 pub struct AccountResponse {
@@ -163,18 +186,35 @@ pub struct ErrorBody {
 // ═══════════════════════════════════════════════════════════════════
 
 /// Build the HTTP router.
+///
+/// CORS is permissive (Any origin, Any method, Any header) because the
+/// chain is public-by-design: every read is something a peer could
+/// learn via gossipsub, and POST /tx is just admitting a signed
+/// transaction (which a peer could also do directly over p2p). This
+/// lets browser-based wallets and block explorers on any origin talk
+/// to the node's HTTP endpoint.
+///
+/// Deploy behind a TLS-terminating reverse proxy for production.
 #[must_use]
 pub fn build_router(state: SharedNodeState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
         .route("/status", get(get_status))
         .route("/validators", get(get_validators))
         .route("/block/:height", get(get_block_by_height))
+        .route("/block/:height/summary", get(get_block_summary_by_height))
         .route("/block/hash/:hex", get(get_block_by_hash))
+        .route("/block/hash/:hex/summary", get(get_block_summary_by_hash))
         .route("/tx/:hex", get(get_tx_location))
         .route("/address/:bech32", get(get_address))
         .route("/state/root", get(get_state_root))
         .route("/mempool/size", get(get_mempool_size))
         .route("/tx", post(post_tx))
+        .layer(cors)
         .with_state(state)
 }
 
@@ -244,6 +284,53 @@ async fn get_block_by_hash(
         .map_err(|e| ApiError::internal("storage", e.to_string()))?
         .ok_or_else(|| ApiError::not_found(format!("no block with hash {hex_str}")))?;
     bincode::serialize(&cb).map_err(|e| ApiError::internal("encode", e.to_string()))
+}
+
+fn summarize_block(
+    cb: &crate::consensus::CommittedBlock,
+) -> Result<BlockSummaryResponse, ApiError> {
+    let block_hash = cb
+        .block
+        .hash()
+        .map_err(|e| ApiError::internal("hash", e.to_string()))?;
+    Ok(BlockSummaryResponse {
+        height: cb.block.header.height,
+        block_hash: block_hash.to_hex(),
+        previous_hash: cb.block.header.previous_hash.to_hex(),
+        timestamp_ms: cb.block.header.timestamp_ms,
+        proposer_hex: hex::encode(cb.block.header.proposer.to_bytes()),
+        tx_merkle_root: cb.block.header.tx_merkle_root.to_hex(),
+        tx_count: u64::try_from(cb.block.transactions.len()).unwrap_or(u64::MAX),
+        qc_vote_count: u64::try_from(cb.qc.votes.len()).unwrap_or(u64::MAX),
+    })
+}
+
+async fn get_block_summary_by_height(
+    State(st): State<SharedNodeState>,
+    Path(height): Path<u64>,
+) -> Result<Json<BlockSummaryResponse>, ApiError> {
+    let guard = st.read().await;
+    let cb = guard
+        .chain
+        .get_committed_block(height)
+        .map_err(|e| ApiError::internal("storage", e.to_string()))?
+        .ok_or_else(|| ApiError::not_found(format!("no block at height {height}")))?;
+    Ok(Json(summarize_block(&cb)?))
+}
+
+async fn get_block_summary_by_hash(
+    State(st): State<SharedNodeState>,
+    Path(hex_str): Path<String>,
+) -> Result<Json<BlockSummaryResponse>, ApiError> {
+    let hash = Hash::from_hex(&hex_str)
+        .map_err(|_| ApiError::bad_request("hash", "hash must be 64 hex chars"))?;
+    let guard = st.read().await;
+    let cb = guard
+        .chain
+        .get_block_by_hash(&hash)
+        .map_err(|e| ApiError::internal("storage", e.to_string()))?
+        .ok_or_else(|| ApiError::not_found(format!("no block with hash {hex_str}")))?;
+    Ok(Json(summarize_block(&cb)?))
 }
 
 async fn get_tx_location(
