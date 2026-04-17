@@ -64,6 +64,19 @@ pub const SIGNATURE_LEN: usize = SIGNATURE_LENGTH;
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PublicKey(VerifyingKey);
 
+impl PartialOrd for PublicKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for PublicKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        // Order by byte representation. Deterministic across platforms.
+        self.0.to_bytes().cmp(&other.0.to_bytes())
+    }
+}
+
 impl PublicKey {
     /// Reconstruct a public key from its 32-byte representation.
     ///

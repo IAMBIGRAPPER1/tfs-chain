@@ -50,7 +50,7 @@ use crate::ADDRESS_HRP;
 ///
 /// Two public keys with different bytes produce different addresses
 /// (preimage resistance of BLAKE3 guarantees this).
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct Address {
     /// The 32-byte address hash (BLAKE3 of the public key).
     hash: Hash,

@@ -65,10 +65,14 @@ pub mod tx;
 // Layer 4 · MINES.script — the doctrine-block DSL
 pub mod mines_script;
 
-// Layers 5–7 · pending Dragon Runs before they land
-// pub mod mines_script;
-// pub mod chain;
-// pub mod consensus;
+// Layer 5 · Chain Logic — state · mempool · consensus · chain · genesis
+pub mod state;
+pub mod mempool;
+pub mod consensus;
+pub mod chain;
+pub mod genesis;
+
+// Layers 6–7 · pending Dragon Runs before they land
 // pub mod storage;
 // pub mod node;
 

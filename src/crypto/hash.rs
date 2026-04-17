@@ -35,7 +35,7 @@ pub const HASH_LEN: usize = 32;
 /// - Address derivation (deriving addresses from public keys)
 /// - Merkle roots (commitment to sets of transactions)
 /// - Content addressing (pointing to doctrine-blocks by content)
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize)]
 pub struct Hash(pub [u8; HASH_LEN]);
 
 impl Hash {
