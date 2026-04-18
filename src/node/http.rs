@@ -147,6 +147,17 @@ pub struct AccountResponse {
     pub nonce: u64,
     /// True if the citizen has been verified on-chain.
     pub verified: bool,
+    /// The sigil bound to this address, if any.
+    pub sigil: Option<String>,
+}
+
+/// `GET /sigil/{name}` and `GET /sigil-by-address/{bech32}` response body.
+#[derive(Serialize, Deserialize)]
+pub struct SigilResponse {
+    /// The sigil name.
+    pub sigil: String,
+    /// The address bound to the sigil, bech32-encoded.
+    pub address: String,
 }
 
 /// `POST /tx` response body.
@@ -213,6 +224,8 @@ pub fn build_router(state: SharedNodeState) -> Router {
         .route("/block/hash/:hex/summary", get(get_block_summary_by_hash))
         .route("/tx/:hex", get(get_tx_location))
         .route("/address/:bech32", get(get_address))
+        .route("/sigil/:name", get(get_sigil_by_name))
+        .route("/sigil-by-address/:bech32", get(get_sigil_by_address))
         .route("/state/root", get(get_state_root))
         .route("/mempool/size", get(get_mempool_size))
         .route("/tx", post(post_tx))
@@ -367,7 +380,42 @@ async fn get_address(
         balance_hyphae: s.balance(&addr),
         nonce: s.nonce(&addr),
         verified: s.verified_citizens.contains(&addr),
+        sigil: s.sigil_of(&addr).cloned(),
     }))
+}
+
+async fn get_sigil_by_name(
+    State(st): State<SharedNodeState>,
+    Path(name): Path<String>,
+) -> Result<Json<SigilResponse>, ApiError> {
+    let guard = st.read().await;
+    let s = guard.chain.state();
+    match s.address_of_sigil(&name) {
+        Some(addr) => Ok(Json(SigilResponse {
+            sigil: name,
+            address: addr.to_bech32(),
+        })),
+        None => Err(ApiError::not_found(format!("sigil {name:?} not bound"))),
+    }
+}
+
+async fn get_sigil_by_address(
+    State(st): State<SharedNodeState>,
+    Path(bech32): Path<String>,
+) -> Result<Json<SigilResponse>, ApiError> {
+    let addr = Address::parse(&bech32)
+        .map_err(|e| ApiError::bad_request("address", e.to_string()))?;
+    let guard = st.read().await;
+    let s = guard.chain.state();
+    match s.sigil_of(&addr) {
+        Some(sigil) => Ok(Json(SigilResponse {
+            sigil: sigil.clone(),
+            address: addr.to_bech32(),
+        })),
+        None => Err(ApiError::not_found(format!(
+            "address {bech32} has no sigil bound"
+        ))),
+    }
 }
 
 async fn get_state_root(

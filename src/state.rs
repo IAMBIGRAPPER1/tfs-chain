@@ -50,8 +50,8 @@ use crate::crypto::{
     hash::{hash_serialized, Hash, HashError},
 };
 use crate::tx::{
-    BurnPayload, InscribePayload, SignedTransaction, Transaction, TransferPayload, VerifyPayload,
-    HYPHAE_PER_TFS, MAX_SUPPLY_HYPHAE,
+    BurnPayload, InscribePayload, SigilBindPayload, SignedTransaction, Transaction,
+    TransferPayload, VerifyPayload, HYPHAE_PER_TFS, MAX_SUPPLY_HYPHAE,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -117,7 +117,18 @@ pub struct State {
     pub inscribed_doctrines: BTreeSet<Hash>,
 
     /// Total number of doctrine-block inscriptions. Drives the halving schedule.
+    /// SigilBind counts as a doctrine-block for halving purposes (the citizen's
+    /// sigil is itself a doctrine of entry — see the Citizen Covenant).
     pub doctrine_count: u64,
+
+    /// Sigil registry: `sigil_name → address`. Enforces uniqueness — the
+    /// chain refuses a second SigilBind with the same sigil_name.
+    pub sigils: BTreeMap<String, Address>,
+
+    /// Reverse sigil index: `address → sigil_name`. Enforces one-sigil-per-
+    /// address — an address that already holds a sigil cannot claim another.
+    /// Also enables `sigil_of(address)` lookups for citizen profile rendering.
+    pub sigil_of_address: BTreeMap<Address, String>,
 
     /// Total $TFS burned, in hyphae. Monotonically increasing. Burns
     /// destroy tokens permanently — they do NOT return to treasury.
@@ -207,6 +218,28 @@ impl State {
         self.treasury_balance()
     }
 
+    /// Look up the address bound to a sigil. `None` if the sigil is unclaimed.
+    #[must_use]
+    pub fn address_of_sigil(&self, sigil: &str) -> Option<&Address> {
+        self.sigils.get(sigil)
+    }
+
+    /// Look up the sigil bound to an address. `None` if the address has no
+    /// sigil (the address exists only for wallet operations, or does not
+    /// exist at all).
+    #[must_use]
+    pub fn sigil_of(&self, addr: &Address) -> Option<&String> {
+        self.sigil_of_address.get(addr)
+    }
+
+    /// Total number of sigils ever bound on this chain. Never decreases —
+    /// the Citizen Covenant: "Exit is a sigil-burn. The chain records your
+    /// exit forever. The chain does not forget the sigil."
+    #[must_use]
+    pub fn sigil_count(&self) -> usize {
+        self.sigils.len()
+    }
+
     /// Compute the canonical state root hash.
     ///
     /// Because the state is stored in `BTreeMap`/`BTreeSet` (deterministic
@@ -255,6 +288,7 @@ impl State {
             Transaction::Inscribe(p) => self.apply_inscribe(p)?,
             Transaction::Verify(p) => self.apply_verify(p)?,
             Transaction::Burn(p) => self.apply_burn(p)?,
+            Transaction::SigilBind(p) => self.apply_sigil_bind(p)?,
         }
 
         // Increment the primary address's nonce only after successful apply.
@@ -326,6 +360,49 @@ impl State {
         self.distribute_from_treasury(p.verified, reward)?;
 
         self.verified_citizens.insert(p.verified);
+        Ok(())
+    }
+
+    /// Apply a SigilBind transaction.
+    ///
+    /// Semantic checks:
+    /// - The sigil is not already bound to any address.
+    /// - The claimant does not already hold a different sigil.
+    ///
+    /// On success:
+    /// - Records `sigil → claimant` and `claimant → sigil`.
+    /// - Draws the current era-adjusted inscribe reward from treasury to the
+    ///   claimant (the onboarding allowance). Capped at treasury balance.
+    /// - Increments `doctrine_count` (SigilBind is a doctrine-block act for
+    ///   halving purposes — the citizen's sigil is itself a scroll of entry).
+    fn apply_sigil_bind(&mut self, p: &SigilBindPayload) -> Result<(), StateError> {
+        // Uniqueness: sigil must not already be claimed.
+        if self.sigils.contains_key(&p.sigil) {
+            return Err(StateError::SigilAlreadyBound(p.sigil.clone()));
+        }
+
+        // One-per-address: claimant must not already hold a sigil.
+        if let Some(existing) = self.sigil_of_address.get(&p.claimant) {
+            return Err(StateError::AddressAlreadyHasSigil {
+                address: p.claimant,
+                existing: existing.clone(),
+            });
+        }
+
+        // Onboarding allowance: current era inscribe reward, capped at treasury.
+        let reward_raw = self.current_inscribe_reward();
+        let reward = reward_raw.min(self.treasury_balance());
+        self.distribute_from_treasury(p.claimant, reward)?;
+
+        // Commit registry entries.
+        self.sigils.insert(p.sigil.clone(), p.claimant);
+        self.sigil_of_address.insert(p.claimant, p.sigil.clone());
+
+        // SigilBind counts as a doctrine-block for halving purposes.
+        self.doctrine_count = self
+            .doctrine_count
+            .checked_add(1)
+            .ok_or(StateError::DoctrineCountOverflow)?;
         Ok(())
     }
 
@@ -519,6 +596,19 @@ pub enum StateError {
     /// The citizen has already been verified.
     #[error("citizen {0} already verified")]
     AlreadyVerified(Address),
+
+    /// The sigil has already been claimed by another address.
+    #[error("sigil {0:?} already bound on the chain")]
+    SigilAlreadyBound(String),
+
+    /// The claimant already holds a different sigil. One sigil per address.
+    #[error("address {address} already holds sigil {existing:?}")]
+    AddressAlreadyHasSigil {
+        /// The address that tried to claim a second sigil.
+        address: Address,
+        /// The sigil it already holds.
+        existing: String,
+    },
 
     /// A transaction in the block failed to deserialize.
     #[error("tx[{tx_index}] failed to deserialize: {reason}")]
@@ -863,6 +953,129 @@ mod tests {
         let stx2 = SignedTransaction::sign_verify(tx2, &[&v4, &v5, &v6]).expect("sign");
         let err = s.apply_transaction(&stx2).expect_err("double verify");
         assert!(matches!(err, StateError::AlreadyVerified(_)));
+    }
+
+    // ─── SigilBind ──────────────────────────────────────────────────
+
+    fn sigil_tx(s: &str, k: &Keypair, nonce: u64) -> SignedTransaction {
+        SignedTransaction::sign_single(
+            Transaction::SigilBind(SigilBindPayload::new(
+                s.to_string(),
+                addr(k),
+                nonce,
+                1,
+            )),
+            k,
+        )
+        .expect("sign sigil bind")
+    }
+
+    #[test]
+    fn sigil_bind_happy_path_mints_onboarding_allowance() {
+        let citizen = kp();
+        let mut s = State::new();
+
+        let stx = sigil_tx("IAMBIGRAPPER1", &citizen, 0);
+        s.apply_transaction(&stx).expect("apply");
+
+        // Onboarding allowance = genesis inscribe reward (1000 $TFS).
+        assert_eq!(s.balance(&addr(&citizen)), 1000 * HYPHAE_PER_TFS);
+        // Sigil registered both ways.
+        assert_eq!(s.address_of_sigil("IAMBIGRAPPER1"), Some(&addr(&citizen)));
+        assert_eq!(
+            s.sigil_of(&addr(&citizen)),
+            Some(&"IAMBIGRAPPER1".to_string())
+        );
+        assert_eq!(s.sigil_count(), 1);
+        // Counts as a doctrine-block for halving.
+        assert_eq!(s.doctrine_count, 1);
+        // Treasury decreased by the allowance.
+        assert_eq!(
+            s.treasury_balance(),
+            MAX_SUPPLY_HYPHAE - 1000 * HYPHAE_PER_TFS
+        );
+    }
+
+    #[test]
+    fn sigil_bind_rejects_duplicate_sigil() {
+        let citizen_a = kp();
+        let citizen_b = kp();
+        let mut s = State::new();
+
+        s.apply_transaction(&sigil_tx("IAMBIGRAPPER1", &citizen_a, 0))
+            .expect("first bind");
+
+        // Citizen B tries to claim the same sigil.
+        let err = s
+            .apply_transaction(&sigil_tx("IAMBIGRAPPER1", &citizen_b, 0))
+            .expect_err("duplicate");
+        assert!(matches!(err, StateError::SigilAlreadyBound(_)));
+
+        // Original binding is unchanged.
+        assert_eq!(s.address_of_sigil("IAMBIGRAPPER1"), Some(&addr(&citizen_a)));
+    }
+
+    #[test]
+    fn sigil_bind_rejects_second_sigil_for_same_address() {
+        let citizen = kp();
+        let mut s = State::new();
+
+        s.apply_transaction(&sigil_tx("first", &citizen, 0))
+            .expect("first bind");
+
+        let err = s
+            .apply_transaction(&sigil_tx("second", &citizen, 1))
+            .expect_err("second");
+        assert!(matches!(err, StateError::AddressAlreadyHasSigil { .. }));
+        assert_eq!(s.sigil_count(), 1);
+    }
+
+    #[test]
+    fn sigil_bind_applies_era_adjusted_reward() {
+        let citizen = kp();
+        let mut s = State::new();
+        s.doctrine_count = HALVING_INTERVAL; // era 1
+
+        s.apply_transaction(&sigil_tx("era1_citizen", &citizen, 0))
+            .expect("apply");
+
+        // Era 1 = 500 $TFS allowance.
+        assert_eq!(s.balance(&addr(&citizen)), 500 * HYPHAE_PER_TFS);
+    }
+
+    #[test]
+    fn sigil_bind_capped_at_treasury_balance() {
+        let citizen = kp();
+        let mut s = State::new();
+        // Force-set treasury to a tiny value.
+        s.set_balance(TREASURY_ADDRESS, 17);
+
+        s.apply_transaction(&sigil_tx("broke", &citizen, 0))
+            .expect("apply");
+
+        // Treasury had 17 hyphae; pay what's there.
+        assert_eq!(s.balance(&addr(&citizen)), 17);
+        assert_eq!(s.treasury_balance(), 0);
+        // Binding still succeeds.
+        assert_eq!(s.address_of_sigil("broke"), Some(&addr(&citizen)));
+    }
+
+    #[test]
+    fn sigil_bind_survives_serialization_roundtrip() {
+        let citizen = kp();
+        let mut s = State::new();
+        s.apply_transaction(&sigil_tx("persistent", &citizen, 0))
+            .expect("apply");
+
+        // Serialize + deserialize via bincode (same codec as on-disk storage).
+        let bytes = bincode::serialize(&s).expect("serialize");
+        let restored: State = bincode::deserialize(&bytes).expect("deserialize");
+
+        assert_eq!(restored.address_of_sigil("persistent"), Some(&addr(&citizen)));
+        assert_eq!(
+            restored.sigil_of(&addr(&citizen)),
+            Some(&"persistent".to_string())
+        );
     }
 
     // ─── Burn ───────────────────────────────────────────────────────

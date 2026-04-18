@@ -74,9 +74,9 @@ use self::keys::{
 };
 use self::schema::{
     all_column_families, CF_BLOCKS, CF_BLOCK_HASH_INDEX, CF_META, CF_STATE_BALANCES,
-    CF_STATE_INSCRIBED, CF_STATE_NONCES, CF_STATE_VERIFIED, CF_TX_INDEX, CURRENT_SCHEMA_VERSION,
-    META_CHAIN_ID, META_DOCTRINE_COUNT, META_HEIGHT, META_LAST_BLOCK_HASH, META_SCHEMA_VERSION,
-    META_SUPPLY_BURNED, META_VALIDATORS,
+    CF_STATE_INSCRIBED, CF_STATE_NONCES, CF_STATE_SIGILS, CF_STATE_SIGIL_BY_ADDR,
+    CF_STATE_VERIFIED, CF_TX_INDEX, CURRENT_SCHEMA_VERSION, META_CHAIN_ID, META_DOCTRINE_COUNT,
+    META_HEIGHT, META_LAST_BLOCK_HASH, META_SCHEMA_VERSION, META_SUPPLY_BURNED, META_VALIDATORS,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -119,6 +119,11 @@ pub struct StateDiff {
 
     /// Newly inscribed doctrine hashes.
     pub newly_inscribed: Vec<Hash>,
+
+    /// Newly bound sigils, as `(sigil_name, address)` pairs. Sigils are
+    /// monotone within a block — once bound they never unbind (exit is a
+    /// sigil-burn, recorded elsewhere).
+    pub newly_bound_sigils: Vec<(String, crate::crypto::address::Address)>,
 
     /// Updated supply_burned value (if changed this block).
     pub supply_burned: Option<u64>,
@@ -177,6 +182,13 @@ impl StateDiff {
         // INSCRIBED: only additions.
         for h in after.inscribed_doctrines.difference(&before.inscribed_doctrines) {
             out.newly_inscribed.push(*h);
+        }
+
+        // SIGILS: only additions (sigils are forever per the Covenant).
+        for (sigil, addr) in &after.sigils {
+            if !before.sigils.contains_key(sigil) {
+                out.newly_bound_sigils.push((sigil.clone(), *addr));
+            }
         }
 
         if before.supply_burned != after.supply_burned {
@@ -529,6 +541,22 @@ impl Storage {
             }
         }
 
+        // SIGILS (forward index is authoritative; reverse index rebuilt from it)
+        {
+            let cf = self
+                .db
+                .cf_handle(CF_STATE_SIGILS)
+                .ok_or(StorageError::MissingColumnFamily(CF_STATE_SIGILS))?;
+            for entry in self.db.iterator_cf(&cf, IteratorMode::Start) {
+                let (k, v) = entry.map_err(|e| StorageError::RocksDb(e.to_string()))?;
+                let sigil = String::from_utf8(k.to_vec())
+                    .map_err(|_| StorageError::Corrupt("sigil key is not valid UTF-8"))?;
+                let addr = address_from_key(&v)?;
+                state.sigils.insert(sigil.clone(), addr);
+                state.sigil_of_address.insert(addr, sigil);
+            }
+        }
+
         // SCALARS
         if let Some(b) = self.get_meta(META_SUPPLY_BURNED)? {
             state.supply_burned = u64_from_be(&b)?;
@@ -636,6 +664,23 @@ impl Storage {
         // Inscribed (additions only).
         for h in &diff.newly_inscribed {
             self.batch_put(&mut batch, CF_STATE_INSCRIBED, &hash_key(h), &[])?;
+        }
+
+        // Sigils (additions only — sigils are forever).
+        // Forward: sigil bytes → address. Reverse: address → sigil bytes.
+        for (sigil, addr) in &diff.newly_bound_sigils {
+            self.batch_put(
+                &mut batch,
+                CF_STATE_SIGILS,
+                sigil.as_bytes(),
+                &address_key(addr),
+            )?;
+            self.batch_put(
+                &mut batch,
+                CF_STATE_SIGIL_BY_ADDR,
+                &address_key(addr),
+                sigil.as_bytes(),
+            )?;
         }
 
         // Scalar meta updates.

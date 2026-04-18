@@ -494,6 +494,65 @@ mod tests {
     // ─── Inscribe + verify flow end-to-end ──────────────────────────
 
     #[test]
+    fn sigil_bind_then_reopen_preserves_binding_and_allowance() {
+        use crate::tx::SigilBindPayload;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_path_buf();
+        let (citizen_addr, citizen) = {
+            let (mut chain, president, vs, set) = bootstrap_chain(&dir);
+            let citizen = kp();
+            let citizen_addr = Address::from_public_key(&citizen.public_key());
+
+            let sigil_tx = SignedTransaction::sign_single(
+                Transaction::SigilBind(SigilBindPayload::new(
+                    "IAMBIGRAPPER1".to_string(),
+                    citizen_addr,
+                    0,
+                    2,
+                )),
+                &citizen,
+            )
+            .unwrap();
+
+            let b1 = crate::block::Block::propose(
+                &chain.tip().block,
+                CHAIN_ID,
+                2,
+                vec![sigil_tx.to_bytes().unwrap()],
+                &president,
+            )
+            .unwrap();
+            let bh1 = b1.hash().unwrap();
+            let refs: Vec<&Keypair> = std::iter::once(&president).chain(vs.iter()).collect();
+            let qc1 = sign_qc(&refs, 1, bh1, &set);
+            let cb1 = CommittedBlock::new(b1, qc1, &set).unwrap();
+            chain.append_committed_block(cb1, 2).unwrap();
+
+            (citizen_addr, citizen)
+        };
+        let _ = citizen; // keep keypair alive until after block commit
+
+        // Reopen.
+        let reopened = PersistentChain::open(&path).expect("reopen");
+        assert_eq!(
+            reopened.state().address_of_sigil("IAMBIGRAPPER1"),
+            Some(&citizen_addr)
+        );
+        assert_eq!(
+            reopened.state().sigil_of(&citizen_addr),
+            Some(&"IAMBIGRAPPER1".to_string())
+        );
+        // Onboarding allowance persisted.
+        assert_eq!(
+            reopened.state().balance(&citizen_addr),
+            1_000 * HYPHAE_PER_TFS
+        );
+        // Sigil count persisted.
+        assert_eq!(reopened.state().sigil_count(), 1);
+    }
+
+    #[test]
     fn inscribe_then_reopen_preserves_doctrine_and_reward() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().to_path_buf();

@@ -52,11 +52,13 @@
 
 pub mod burn;
 pub mod inscribe;
+pub mod sigil;
 pub mod transfer;
 pub mod verify;
 
 pub use burn::BurnPayload;
 pub use inscribe::InscribePayload;
+pub use sigil::{SigilBindPayload, MAX_SIGIL_LEN};
 pub use transfer::TransferPayload;
 pub use verify::VerifyPayload;
 
@@ -120,6 +122,11 @@ pub enum Transaction {
 
     /// Ceremonial burn of $TFS. Permanently reduces supply.
     Burn(BurnPayload),
+
+    /// Claim a sigil on the chain. One sigil per citizen. First to inscribe
+    /// holds it forever. Draws the era-adjusted inscribe reward from treasury
+    /// as the citizen's onboarding allowance.
+    SigilBind(SigilBindPayload),
 }
 
 impl Transaction {
@@ -147,6 +154,7 @@ impl Transaction {
             Self::Inscribe(i) => i.nonce,
             Self::Verify(v) => v.nonce,
             Self::Burn(b) => b.nonce,
+            Self::SigilBind(s) => s.nonce,
         }
     }
 
@@ -158,6 +166,7 @@ impl Transaction {
             Self::Inscribe(i) => i.timestamp_ms,
             Self::Verify(v) => v.timestamp_ms,
             Self::Burn(b) => b.timestamp_ms,
+            Self::SigilBind(s) => s.timestamp_ms,
         }
     }
 
@@ -167,6 +176,7 @@ impl Transaction {
     /// - Inscribe: `inscriber`
     /// - Verify: `verified` (the citizen receiving the mint; verifiers are in the signatures)
     /// - Burn: `burner`
+    /// - SigilBind: `claimant`
     #[must_use]
     pub const fn primary_address(&self) -> &Address {
         match self {
@@ -174,6 +184,7 @@ impl Transaction {
             Self::Inscribe(i) => &i.inscriber,
             Self::Verify(v) => &v.verified,
             Self::Burn(b) => &b.burner,
+            Self::SigilBind(s) => &s.claimant,
         }
     }
 
@@ -199,6 +210,7 @@ impl Transaction {
             Self::Inscribe(i) => i.validate_invariants(),
             Self::Verify(v) => v.validate_invariants(),
             Self::Burn(b) => b.validate_invariants(),
+            Self::SigilBind(s) => s.validate_invariants(),
         }
     }
 }
@@ -411,9 +423,10 @@ impl SignedTransaction {
         let body_hash = self.tx.body_hash()?;
 
         match &self.tx {
-            Transaction::Transfer(_) | Transaction::Inscribe(_) | Transaction::Burn(_) => {
-                self.validate_single_signer(&body_hash)
-            }
+            Transaction::Transfer(_)
+            | Transaction::Inscribe(_)
+            | Transaction::Burn(_)
+            | Transaction::SigilBind(_) => self.validate_single_signer(&body_hash),
             Transaction::Verify(payload) => self.validate_quorum(&body_hash, &payload.verified),
         }
     }
@@ -520,6 +533,23 @@ pub enum TxError {
         /// Maximum allowed.
         max: usize,
     },
+
+    /// SigilBind with an empty sigil string.
+    #[error("sigil is empty")]
+    EmptySigil,
+
+    /// SigilBind whose sigil exceeds [`MAX_SIGIL_LEN`].
+    #[error("sigil too long: {actual} bytes, max is {max}")]
+    SigilTooLong {
+        /// Actual sigil length.
+        actual: usize,
+        /// Maximum allowed.
+        max: usize,
+    },
+
+    /// SigilBind contains a character outside the allowed set `[A-Za-z0-9_-]`.
+    #[error("invalid sigil character: {0:?}")]
+    InvalidSigilChar(char),
 
     /// Number of signatures doesn't match expectations for this tx type.
     #[error("wrong signature count: expected {expected}, got {actual}")]
@@ -943,6 +973,87 @@ mod tests {
         let signed = SignedTransaction::sign_single(tx, &citizen).expect("sign");
         let err = signed.validate_structure().expect_err("reason too long");
         assert!(matches!(err, TxError::BurnReasonTooLong { .. }));
+    }
+
+    // ─── SIGIL BIND ─────────────────────────────────────────────────
+
+    fn sigil_payload(s: &str, k: &Keypair) -> Transaction {
+        Transaction::SigilBind(SigilBindPayload::new(
+            s.to_string(),
+            addr(k),
+            0,
+            now_ms(),
+        ))
+    }
+
+    #[test]
+    fn sigil_bind_happy_path() {
+        let citizen = kp();
+        let tx = sigil_payload("IAMBIGRAPPER1", &citizen);
+        let signed = SignedTransaction::sign_single(tx, &citizen).expect("sign");
+        signed.validate_structure().expect("valid");
+    }
+
+    #[test]
+    fn sigil_bind_rejects_empty() {
+        let citizen = kp();
+        let tx = sigil_payload("", &citizen);
+        let signed = SignedTransaction::sign_single(tx, &citizen).expect("sign");
+        let err = signed.validate_structure().expect_err("empty sigil");
+        assert!(matches!(err, TxError::EmptySigil));
+    }
+
+    #[test]
+    fn sigil_bind_rejects_oversized() {
+        let citizen = kp();
+        let long = "a".repeat(MAX_SIGIL_LEN + 1);
+        let tx = sigil_payload(&long, &citizen);
+        let signed = SignedTransaction::sign_single(tx, &citizen).expect("sign");
+        let err = signed.validate_structure().expect_err("too long");
+        assert!(matches!(err, TxError::SigilTooLong { .. }));
+    }
+
+    #[test]
+    fn sigil_bind_rejects_whitespace() {
+        let citizen = kp();
+        let tx = sigil_payload("big rapper", &citizen);
+        let signed = SignedTransaction::sign_single(tx, &citizen).expect("sign");
+        let err = signed.validate_structure().expect_err("whitespace");
+        assert!(matches!(err, TxError::InvalidSigilChar(' ')));
+    }
+
+    #[test]
+    fn sigil_bind_rejects_punctuation() {
+        let citizen = kp();
+        let tx = sigil_payload("big.rapper", &citizen);
+        let signed = SignedTransaction::sign_single(tx, &citizen).expect("sign");
+        let err = signed.validate_structure().expect_err("punctuation");
+        assert!(matches!(err, TxError::InvalidSigilChar('.')));
+    }
+
+    #[test]
+    fn sigil_bind_accepts_hyphens_and_underscores() {
+        let citizen = kp();
+        let tx = sigil_payload("big-rapper_001", &citizen);
+        let signed = SignedTransaction::sign_single(tx, &citizen).expect("sign");
+        signed.validate_structure().expect("valid");
+    }
+
+    #[test]
+    fn sigil_bind_rejects_wrong_signer() {
+        let citizen = kp();
+        let impostor = kp();
+        let tx = sigil_payload("IAMBIGRAPPER1", &citizen);
+        let err = SignedTransaction::sign_single(tx, &impostor).expect_err("wrong signer");
+        assert!(matches!(err, TxError::SignerAddressMismatch { .. }));
+    }
+
+    #[test]
+    fn sigil_bind_body_hash_is_deterministic() {
+        let citizen = kp();
+        let t1 = sigil_payload("IAMBIGRAPPER1", &citizen);
+        let t2 = t1.clone();
+        assert_eq!(t1.body_hash().unwrap(), t2.body_hash().unwrap());
     }
 
     // ─── CROSS-VARIANT INVARIANTS ───────────────────────────────────

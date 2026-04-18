@@ -75,6 +75,18 @@ pub const CF_STATE_VERIFIED: &str = "state_verified";
 /// - Value: empty — existence is the signal
 pub const CF_STATE_INSCRIBED: &str = "state_inscribed";
 
+/// CF · sigil registry, forward index.
+///
+/// - Key: sigil name as UTF-8 bytes (≤ 16 bytes per Citizen Covenant)
+/// - Value: 32-byte address bound to this sigil
+pub const CF_STATE_SIGILS: &str = "state_sigils";
+
+/// CF · sigil registry, reverse index.
+///
+/// - Key: 32-byte address
+/// - Value: sigil name as UTF-8 bytes
+pub const CF_STATE_SIGIL_BY_ADDR: &str = "state_sigil_by_addr";
+
 /// CF · scalar state and chain metadata.
 ///
 /// - Key: one of the `META_*` constants below
@@ -93,6 +105,8 @@ pub fn all_column_families() -> Vec<&'static str> {
         CF_STATE_NONCES,
         CF_STATE_VERIFIED,
         CF_STATE_INSCRIBED,
+        CF_STATE_SIGILS,
+        CF_STATE_SIGIL_BY_ADDR,
         CF_META,
     ]
 }
@@ -139,4 +153,8 @@ pub const META_LAST_BLOCK_HASH: &[u8] = b"last_block_hash";
 /// v1 → v2: Model B economics. Removed `supply_issued` meta key;
 /// supply-minted is now implicit from TREASURY_ADDRESS balance under
 /// CF_STATE_BALANCES. v1 databases are not readable by v2 binaries.
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+///
+/// v2 → v3: Sigil registry. Added CF_STATE_SIGILS and CF_STATE_SIGIL_BY_ADDR
+/// to persist the Citizen Covenant's name-binding index. v2 databases are
+/// not readable by v3 binaries (missing CFs).
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
