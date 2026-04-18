@@ -59,7 +59,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::crypto::address::Address;
 use crate::crypto::hash::Hash;
-use crate::tx::SignedTransaction;
+use crate::tx::{SignedTransaction, Transaction};
 
 use super::SharedNodeState;
 
@@ -160,6 +160,63 @@ pub struct SigilResponse {
     pub address: String,
 }
 
+/// One transaction inside a committed block, decoded for display.
+/// Returned by `GET /block/{height}/transactions`.
+#[derive(Serialize, Deserialize)]
+pub struct TxSummary {
+    /// Hex-encoded 32-byte tx_id (BLAKE3 over the signed tx).
+    pub tx_id_hex: String,
+    /// Act label: "TRANSFER" | "INSCRIBE" | "VERIFY" | "BURN" | "SIGIL_BIND".
+    pub act: String,
+    /// bech32 address of the primary signer for this tx.
+    /// For Transfer: the `from` address. For Inscribe: the inscriber.
+    /// For Verify: the first verifier in the quorum. For Burn: the burner.
+    /// For SigilBind: the claimant.
+    pub signer_address: String,
+    /// The sigil bound to `signer_address` on-chain, if any. None otherwise.
+    pub signer_sigil: Option<String>,
+    /// The citizen address this act is FOR — not always the same as signer.
+    /// For Transfer: `to`. For Verify: `verified`. Otherwise same as signer.
+    pub principal_address: String,
+    /// Sigil bound to `principal_address`, if any.
+    pub principal_sigil: Option<String>,
+    /// Act-specific metadata (amount, sigil name, doctrine size, etc).
+    pub details: TxDetails,
+}
+
+/// Act-specific transaction details for display.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind")]
+pub enum TxDetails {
+    #[serde(rename = "transfer")]
+    Transfer { amount_hyphae: u64 },
+    #[serde(rename = "inscribe")]
+    Inscribe {
+        doctrine_hash_hex: String,
+        doctrine_size_bytes: u64,
+    },
+    #[serde(rename = "verify")]
+    Verify { verifier_count: u64 },
+    #[serde(rename = "burn")]
+    Burn {
+        amount_hyphae: u64,
+        reason: Option<String>,
+    },
+    #[serde(rename = "sigil_bind")]
+    SigilBind { sigil: String },
+}
+
+/// `GET /block/{height}/transactions` response body.
+#[derive(Serialize, Deserialize)]
+pub struct BlockTransactionsResponse {
+    /// Block height.
+    pub height: u64,
+    /// Hex-encoded 32-byte block hash.
+    pub block_hash_hex: String,
+    /// Decoded transactions in the order they appear in the block.
+    pub transactions: Vec<TxSummary>,
+}
+
 /// `POST /tx` response body.
 #[derive(Serialize, Deserialize)]
 pub struct TxSubmitResponse {
@@ -220,6 +277,7 @@ pub fn build_router(state: SharedNodeState) -> Router {
         .route("/validators", get(get_validators))
         .route("/block/:height", get(get_block_by_height))
         .route("/block/:height/summary", get(get_block_summary_by_height))
+        .route("/block/:height/transactions", get(get_block_transactions))
         .route("/block/hash/:hex", get(get_block_by_hash))
         .route("/block/hash/:hex/summary", get(get_block_summary_by_hash))
         .route("/tx/:hex", get(get_tx_location))
@@ -332,6 +390,101 @@ async fn get_block_summary_by_height(
         .map_err(|e| ApiError::internal("storage", e.to_string()))?
         .ok_or_else(|| ApiError::not_found(format!("no block at height {height}")))?;
     Ok(Json(summarize_block(&cb)?))
+}
+
+async fn get_block_transactions(
+    State(st): State<SharedNodeState>,
+    Path(height): Path<u64>,
+) -> Result<Json<BlockTransactionsResponse>, ApiError> {
+    let guard = st.read().await;
+    let chain = &guard.chain;
+    let state = chain.state();
+
+    let cb = chain
+        .get_committed_block(height)
+        .map_err(|e| ApiError::internal("storage", e.to_string()))?
+        .ok_or_else(|| ApiError::not_found(format!("no block at height {height}")))?;
+
+    let block_hash = cb
+        .block
+        .hash()
+        .map_err(|e| ApiError::internal("hash", e.to_string()))?;
+
+    let mut transactions = Vec::with_capacity(cb.block.transactions.len());
+    for tx_bytes in &cb.block.transactions {
+        let stx = SignedTransaction::from_bytes(tx_bytes)
+            .map_err(|e| ApiError::internal("decode_tx", e.to_string()))?;
+
+        let tx_id = stx
+            .tx_id()
+            .map_err(|e| ApiError::internal("hash", e.to_string()))?;
+
+        // First signer is the primary actor for every single-signer variant;
+        // for Verify the first signer is the first verifier in the quorum.
+        let signer_address = if let Some(sig) = stx.signatures.first() {
+            sig.signer_address()
+        } else {
+            return Err(ApiError::internal("decode_tx", "signed tx has no signatures"));
+        };
+        let signer_sigil = state.sigil_of(&signer_address).cloned();
+
+        let (act, principal_address, details) = match &stx.tx {
+            Transaction::Transfer(p) => (
+                "TRANSFER",
+                p.to,
+                TxDetails::Transfer {
+                    amount_hyphae: p.amount_hyphae,
+                },
+            ),
+            Transaction::Inscribe(p) => (
+                "INSCRIBE",
+                p.inscriber,
+                TxDetails::Inscribe {
+                    doctrine_hash_hex: p.doctrine_hash.to_hex(),
+                    doctrine_size_bytes: p.doctrine_bytes.len() as u64,
+                },
+            ),
+            Transaction::Verify(p) => (
+                "VERIFY",
+                p.verified,
+                TxDetails::Verify {
+                    verifier_count: stx.signatures.len() as u64,
+                },
+            ),
+            Transaction::Burn(p) => (
+                "BURN",
+                p.burner,
+                TxDetails::Burn {
+                    amount_hyphae: p.amount_hyphae,
+                    reason: p.reason.clone(),
+                },
+            ),
+            Transaction::SigilBind(p) => (
+                "SIGIL_BIND",
+                p.claimant,
+                TxDetails::SigilBind {
+                    sigil: p.sigil.clone(),
+                },
+            ),
+        };
+        let principal_sigil = state.sigil_of(&principal_address).cloned();
+
+        transactions.push(TxSummary {
+            tx_id_hex: tx_id.to_hex(),
+            act: act.to_string(),
+            signer_address: signer_address.to_bech32(),
+            signer_sigil,
+            principal_address: principal_address.to_bech32(),
+            principal_sigil,
+            details,
+        });
+    }
+
+    Ok(Json(BlockTransactionsResponse {
+        height,
+        block_hash_hex: block_hash.to_hex(),
+        transactions,
+    }))
 }
 
 async fn get_block_summary_by_hash(
