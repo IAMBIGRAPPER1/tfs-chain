@@ -121,13 +121,22 @@ pub struct State {
     /// sigil is itself a doctrine of entry — see the Citizen Covenant).
     pub doctrine_count: u64,
 
-    /// Sigil registry: `sigil_name → address`. Enforces uniqueness — the
-    /// chain refuses a second SigilBind with the same sigil_name.
+    /// Sigil registry: `lowercase_sigil_name → address`. The key is
+    /// ALWAYS the ASCII-lowercase form of the sigil string, so uniqueness
+    /// is enforced case-insensitively: once "IAMBIGRAPPER1" is bound,
+    /// "iambigrapper1", "IamBigRapper1", etc. are all rejected as
+    /// SigilAlreadyBound. This is doctrine — the Covenant promises
+    /// "the first citizen to inscribe a sigil holds it forever," and
+    /// "forever" means no same-letters-different-case counter-claim.
+    /// The original-case form is preserved for display via
+    /// [`Self::sigil_of_address`].
     pub sigils: BTreeMap<String, Address>,
 
-    /// Reverse sigil index: `address → sigil_name`. Enforces one-sigil-per-
-    /// address — an address that already holds a sigil cannot claim another.
-    /// Also enables `sigil_of(address)` lookups for citizen profile rendering.
+    /// Reverse sigil index: `address → sigil_name` in the citizen's
+    /// ORIGINAL case as first inscribed. Used for display. Enforces
+    /// one-sigil-per-address — an address that already holds a sigil
+    /// cannot claim another. Also drives `sigil_of(address)` for
+    /// citizen profile rendering.
     pub sigil_of_address: BTreeMap<Address, String>,
 
     /// Total $TFS burned, in hyphae. Monotonically increasing. Burns
@@ -218,10 +227,13 @@ impl State {
         self.treasury_balance()
     }
 
-    /// Look up the address bound to a sigil. `None` if the sigil is unclaimed.
+    /// Look up the address bound to a sigil. Case-insensitive —
+    /// `address_of_sigil("IAMBIGRAPPER1")` and `address_of_sigil("iambigrapper1")`
+    /// both resolve to the same binding (whichever was first claimed).
+    /// `None` if the sigil is unclaimed.
     #[must_use]
     pub fn address_of_sigil(&self, sigil: &str) -> Option<&Address> {
-        self.sigils.get(sigil)
+        self.sigils.get(&sigil.to_lowercase())
     }
 
     /// Look up the sigil bound to an address. `None` if the address has no
@@ -376,8 +388,11 @@ impl State {
     /// - Increments `doctrine_count` (SigilBind is a doctrine-block act for
     ///   halving purposes — the citizen's sigil is itself a scroll of entry).
     fn apply_sigil_bind(&mut self, p: &SigilBindPayload) -> Result<(), StateError> {
-        // Uniqueness: sigil must not already be claimed.
-        if self.sigils.contains_key(&p.sigil) {
+        // Uniqueness: sigil key is ASCII-lowercased before comparison.
+        // "IAMBIGRAPPER1", "iambigrapper1", "IamBigRapper1" all map to
+        // the same key, so only the first claim lands.
+        let key = p.sigil.to_lowercase();
+        if self.sigils.contains_key(&key) {
             return Err(StateError::SigilAlreadyBound(p.sigil.clone()));
         }
 
@@ -394,8 +409,10 @@ impl State {
         let reward = reward_raw.min(self.treasury_balance());
         self.distribute_from_treasury(p.claimant, reward)?;
 
-        // Commit registry entries.
-        self.sigils.insert(p.sigil.clone(), p.claimant);
+        // Commit registry entries. Forward index uses the lowercase key;
+        // reverse index preserves the citizen's chosen capitalization as
+        // the canonical display form.
+        self.sigils.insert(key, p.claimant);
         self.sigil_of_address.insert(p.claimant, p.sigil.clone());
 
         // SigilBind counts as a doctrine-block for halving purposes.
@@ -1013,6 +1030,44 @@ mod tests {
 
         // Original binding is unchanged.
         assert_eq!(s.address_of_sigil("IAMBIGRAPPER1"), Some(&addr(&citizen_a)));
+    }
+
+    #[test]
+    fn sigil_bind_rejects_case_variants() {
+        // IAMBIGRAPPER1 claimed first → iambigrapper1, IamBigRapper1, etc.
+        // are all rejected. Display form preserves the original case.
+        let alpha = kp();
+        let beta = kp();
+        let gamma = kp();
+        let mut s = State::new();
+
+        s.apply_transaction(&sigil_tx("IAMBIGRAPPER1", &alpha, 0))
+            .expect("first bind");
+
+        // Lowercase variant: rejected.
+        let err = s
+            .apply_transaction(&sigil_tx("iambigrapper1", &beta, 0))
+            .expect_err("lowercase variant");
+        assert!(matches!(err, StateError::SigilAlreadyBound(_)));
+
+        // MixedCase variant: also rejected.
+        let err = s
+            .apply_transaction(&sigil_tx("IamBigRapper1", &gamma, 0))
+            .expect_err("mixed case variant");
+        assert!(matches!(err, StateError::SigilAlreadyBound(_)));
+
+        // Lookup by any case resolves to the original binding.
+        assert_eq!(s.address_of_sigil("IAMBIGRAPPER1"), Some(&addr(&alpha)));
+        assert_eq!(s.address_of_sigil("iambigrapper1"), Some(&addr(&alpha)));
+        assert_eq!(s.address_of_sigil("IamBigRapper1"), Some(&addr(&alpha)));
+
+        // Display form preserves the citizen's chosen capitalization.
+        assert_eq!(
+            s.sigil_of(&addr(&alpha)),
+            Some(&"IAMBIGRAPPER1".to_string())
+        );
+        // Only one binding on the chain.
+        assert_eq!(s.sigil_count(), 1);
     }
 
     #[test]

@@ -157,4 +157,10 @@ pub const META_LAST_BLOCK_HASH: &[u8] = b"last_block_hash";
 /// v2 → v3: Sigil registry. Added CF_STATE_SIGILS and CF_STATE_SIGIL_BY_ADDR
 /// to persist the Citizen Covenant's name-binding index. v2 databases are
 /// not readable by v3 binaries (missing CFs).
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+///
+/// v3 → v4: Case-insensitive sigil uniqueness. CF_STATE_SIGILS now stores
+/// the lowercase form of each sigil as the key (so "IAMBIGRAPPER1" and
+/// "iambigrapper1" collide as intended); CF_STATE_SIGIL_BY_ADDR stores
+/// the original-case display form. v3 databases have mixed-case keys
+/// and are incompatible — v4 binaries refuse to open them.
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;

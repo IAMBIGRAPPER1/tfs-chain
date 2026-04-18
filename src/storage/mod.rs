@@ -120,10 +120,18 @@ pub struct StateDiff {
     /// Newly inscribed doctrine hashes.
     pub newly_inscribed: Vec<Hash>,
 
-    /// Newly bound sigils, as `(sigil_name, address)` pairs. Sigils are
-    /// monotone within a block — once bound they never unbind (exit is a
+    /// Newly bound sigils, as `(lowercase_key, display_form, address)`
+    /// triples. The lowercase key is what goes into CF_STATE_SIGILS for
+    /// case-insensitive uniqueness lookup; the display form is what goes
+    /// into CF_STATE_SIGIL_BY_ADDR so profile pages and the ledger can
+    /// render the citizen's chosen capitalization. Sigils are monotone
+    /// within a block — once bound they never unbind (exit is a
     /// sigil-burn, recorded elsewhere).
-    pub newly_bound_sigils: Vec<(String, crate::crypto::address::Address)>,
+    pub newly_bound_sigils: Vec<(
+        String,
+        String,
+        crate::crypto::address::Address,
+    )>,
 
     /// Updated supply_burned value (if changed this block).
     pub supply_burned: Option<u64>,
@@ -185,9 +193,13 @@ impl StateDiff {
         }
 
         // SIGILS: only additions (sigils are forever per the Covenant).
-        for (sigil, addr) in &after.sigils {
-            if !before.sigils.contains_key(sigil) {
-                out.newly_bound_sigils.push((sigil.clone(), *addr));
+        // Diff via the reverse index because it carries the display form;
+        // the forward index stores the lowercase key which we re-derive
+        // at commit time.
+        for (addr, display) in &after.sigil_of_address {
+            if !before.sigil_of_address.contains_key(addr) {
+                let key = display.to_lowercase();
+                out.newly_bound_sigils.push((key, display.clone(), *addr));
             }
         }
 
@@ -541,7 +553,10 @@ impl Storage {
             }
         }
 
-        // SIGILS (forward index is authoritative; reverse index rebuilt from it)
+        // SIGILS · forward CF holds lowercase_key → address (case-insensitive
+        // uniqueness lookup). Reverse CF holds address → display_form
+        // (citizen's chosen capitalization). Load each map from its own CF
+        // so display case survives a reopen.
         {
             let cf = self
                 .db
@@ -549,11 +564,23 @@ impl Storage {
                 .ok_or(StorageError::MissingColumnFamily(CF_STATE_SIGILS))?;
             for entry in self.db.iterator_cf(&cf, IteratorMode::Start) {
                 let (k, v) = entry.map_err(|e| StorageError::RocksDb(e.to_string()))?;
-                let sigil = String::from_utf8(k.to_vec())
+                let key = String::from_utf8(k.to_vec())
                     .map_err(|_| StorageError::Corrupt("sigil key is not valid UTF-8"))?;
                 let addr = address_from_key(&v)?;
-                state.sigils.insert(sigil.clone(), addr);
-                state.sigil_of_address.insert(addr, sigil);
+                state.sigils.insert(key, addr);
+            }
+        }
+        {
+            let cf = self
+                .db
+                .cf_handle(CF_STATE_SIGIL_BY_ADDR)
+                .ok_or(StorageError::MissingColumnFamily(CF_STATE_SIGIL_BY_ADDR))?;
+            for entry in self.db.iterator_cf(&cf, IteratorMode::Start) {
+                let (k, v) = entry.map_err(|e| StorageError::RocksDb(e.to_string()))?;
+                let addr = address_from_key(&k)?;
+                let display = String::from_utf8(v.to_vec())
+                    .map_err(|_| StorageError::Corrupt("sigil display is not valid UTF-8"))?;
+                state.sigil_of_address.insert(addr, display);
             }
         }
 
@@ -667,19 +694,20 @@ impl Storage {
         }
 
         // Sigils (additions only — sigils are forever).
-        // Forward: sigil bytes → address. Reverse: address → sigil bytes.
-        for (sigil, addr) in &diff.newly_bound_sigils {
+        // Forward: lowercase_key bytes → address (case-insensitive lookup).
+        // Reverse: address → display_form bytes (preserves citizen casing).
+        for (key, display, addr) in &diff.newly_bound_sigils {
             self.batch_put(
                 &mut batch,
                 CF_STATE_SIGILS,
-                sigil.as_bytes(),
+                key.as_bytes(),
                 &address_key(addr),
             )?;
             self.batch_put(
                 &mut batch,
                 CF_STATE_SIGIL_BY_ADDR,
                 &address_key(addr),
-                sigil.as_bytes(),
+                display.as_bytes(),
             )?;
         }
 
