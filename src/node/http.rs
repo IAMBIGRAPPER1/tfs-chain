@@ -76,11 +76,13 @@ pub struct StatusResponse {
     pub height: u64,
     /// Hex-encoded hash of the most recent block.
     pub last_block_hash: String,
-    /// Total $TFS issued in hyphae (10⁻⁹ $TFS).
-    pub supply_issued_hyphae: u64,
+    /// Treasury balance in hyphae — supply remaining to distribute.
+    pub treasury_hyphae: u64,
+    /// Supply already distributed to citizens = 1B − treasury.
+    pub distributed_hyphae: u64,
     /// Total $TFS burned in hyphae.
     pub supply_burned_hyphae: u64,
-    /// Circulating supply = issued − burned, in hyphae.
+    /// Circulating supply = 1B − burned, in hyphae.
     pub circulating_supply_hyphae: u64,
     /// Number of inscribed doctrines.
     pub doctrine_count: u64,
@@ -235,7 +237,8 @@ async fn get_status(State(st): State<SharedNodeState>) -> Result<Json<StatusResp
         chain_id: chain.chain_id().to_string(),
         height: chain.height(),
         last_block_hash: last_hash.to_hex(),
-        supply_issued_hyphae: state.supply_issued,
+        treasury_hyphae: state.treasury_balance(),
+        distributed_hyphae: crate::tx::MAX_SUPPLY_HYPHAE - state.treasury_balance(),
         supply_burned_hyphae: state.supply_burned,
         circulating_supply_hyphae: state.circulating_supply(),
         doctrine_count: state.doctrine_count,
@@ -554,7 +557,7 @@ mod tests {
         assert_eq!(body.chain_id, CHAIN_ID);
         assert_eq!(body.height, 0);
         assert_eq!(body.doctrine_count, 1);
-        assert_eq!(body.supply_issued_hyphae, 1_000 * HYPHAE_PER_TFS);
+        assert_eq!(body.distributed_hyphae, 1_000 * HYPHAE_PER_TFS);
     }
 
     #[tokio::test]

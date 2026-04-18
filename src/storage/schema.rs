@@ -113,9 +113,6 @@ pub const META_CHAIN_ID: &[u8] = b"chain_id";
 /// The authorized validator set, serialized with bincode.
 pub const META_VALIDATORS: &[u8] = b"validators";
 
-/// Total $TFS issued to date, in hyphae. u64 big-endian.
-pub const META_SUPPLY_ISSUED: &[u8] = b"supply_issued";
-
 /// Total $TFS burned to date, in hyphae. u64 big-endian.
 pub const META_SUPPLY_BURNED: &[u8] = b"supply_burned";
 
@@ -138,4 +135,8 @@ pub const META_LAST_BLOCK_HASH: &[u8] = b"last_block_hash";
 /// A mismatched version is a hard error at `Storage::open` — the binary
 /// refuses to touch a DB with a different version. This prevents
 /// silent corruption when schema changes.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+///
+/// v1 → v2: Model B economics. Removed `supply_issued` meta key;
+/// supply-minted is now implicit from TREASURY_ADDRESS balance under
+/// CF_STATE_BALANCES. v1 databases are not readable by v2 binaries.
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;

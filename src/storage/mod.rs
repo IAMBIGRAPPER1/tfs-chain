@@ -76,7 +76,7 @@ use self::schema::{
     all_column_families, CF_BLOCKS, CF_BLOCK_HASH_INDEX, CF_META, CF_STATE_BALANCES,
     CF_STATE_INSCRIBED, CF_STATE_NONCES, CF_STATE_VERIFIED, CF_TX_INDEX, CURRENT_SCHEMA_VERSION,
     META_CHAIN_ID, META_DOCTRINE_COUNT, META_HEIGHT, META_LAST_BLOCK_HASH, META_SCHEMA_VERSION,
-    META_SUPPLY_BURNED, META_SUPPLY_ISSUED, META_VALIDATORS,
+    META_SUPPLY_BURNED, META_VALIDATORS,
 };
 
 // ═══════════════════════════════════════════════════════════════════
@@ -119,9 +119,6 @@ pub struct StateDiff {
 
     /// Newly inscribed doctrine hashes.
     pub newly_inscribed: Vec<Hash>,
-
-    /// Updated supply_issued value (if changed this block).
-    pub supply_issued: Option<u64>,
 
     /// Updated supply_burned value (if changed this block).
     pub supply_burned: Option<u64>,
@@ -182,9 +179,6 @@ impl StateDiff {
             out.newly_inscribed.push(*h);
         }
 
-        if before.supply_issued != after.supply_issued {
-            out.supply_issued = Some(after.supply_issued);
-        }
         if before.supply_burned != after.supply_burned {
             out.supply_burned = Some(after.supply_burned);
         }
@@ -275,7 +269,6 @@ impl Storage {
         )?;
         storage.batch_put_meta(&mut batch, META_CHAIN_ID, chain_id.as_bytes())?;
         storage.batch_put_meta(&mut batch, META_VALIDATORS, &validators_bytes)?;
-        storage.batch_put_meta(&mut batch, META_SUPPLY_ISSUED, &u64_to_be(0))?;
         storage.batch_put_meta(&mut batch, META_SUPPLY_BURNED, &u64_to_be(0))?;
         storage.batch_put_meta(&mut batch, META_DOCTRINE_COUNT, &u64_to_be(0))?;
         // Height and last_block_hash left unset until genesis lands.
@@ -537,9 +530,6 @@ impl Storage {
         }
 
         // SCALARS
-        if let Some(b) = self.get_meta(META_SUPPLY_ISSUED)? {
-            state.supply_issued = u64_from_be(&b)?;
-        }
         if let Some(b) = self.get_meta(META_SUPPLY_BURNED)? {
             state.supply_burned = u64_from_be(&b)?;
         }
@@ -649,9 +639,6 @@ impl Storage {
         }
 
         // Scalar meta updates.
-        if let Some(v) = diff.supply_issued {
-            self.batch_put_meta(&mut batch, META_SUPPLY_ISSUED, &u64_to_be(v))?;
-        }
         if let Some(v) = diff.supply_burned {
             self.batch_put_meta(&mut batch, META_SUPPLY_BURNED, &u64_to_be(v))?;
         }

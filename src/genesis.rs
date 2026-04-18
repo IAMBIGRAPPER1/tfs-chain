@@ -271,8 +271,13 @@ mod tests {
             1_000 * HYPHAE_PER_TFS
         );
 
-        // Supply issued equals the reward.
-        assert_eq!(chain.state().supply_issued, 1_000 * HYPHAE_PER_TFS);
+        // Treasury was debited by exactly the genesis inscription reward.
+        use crate::state::TREASURY_ADDRESS;
+        use crate::tx::MAX_SUPPLY_HYPHAE;
+        assert_eq!(
+            chain.state().balance(&TREASURY_ADDRESS),
+            MAX_SUPPLY_HYPHAE - (1_000 * HYPHAE_PER_TFS)
+        );
         assert_eq!(chain.state().doctrine_count, 1);
     }
 

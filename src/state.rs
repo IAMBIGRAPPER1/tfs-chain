@@ -58,17 +58,36 @@ use crate::tx::{
 // CONSTANTS · economic
 // ═══════════════════════════════════════════════════════════════════
 
-/// Initial $TFS minted per Inscribe at the genesis era.
+/// Initial $TFS distributed per Inscribe at the genesis era.
 /// From the scroll: "At GENESIS, the share is one thousand $TFS per inscription."
 pub const GENESIS_INSCRIBE_REWARD_TFS: u64 = 1_000;
 
-/// Initial $TFS minted per Verify event at the genesis era.
+/// Initial $TFS distributed per Verify event at the genesis era.
 /// From the scroll: "At GENESIS, the share is one hundred $TFS per verification event."
 pub const GENESIS_VERIFY_REWARD_TFS: u64 = 100;
 
 /// Number of doctrine-block inscriptions between halvings.
 /// From the scroll: "Every fifty thousand doctrine-blocks, the issuance per act halves."
 pub const HALVING_INTERVAL: u64 = 50_000;
+
+/// The canonical TFS_TREASURY address. Holds the entire 1,000,000,000 $TFS
+/// supply at genesis. Every Inscribe / Verify / Routing reward is a
+/// protocol-level transfer FROM this address TO the citizen.
+///
+/// **No private key exists for this address.** The 32 bytes below are
+/// `BLAKE3("tfs-treasury-genesis-v1")`, a well-known preimage. Because
+/// BLAKE3 is preimage-resistant, no one can produce a public key that
+/// hashes to these bytes — which means no one can sign a normal Transfer
+/// from the treasury. The ONLY paths that can debit the treasury are
+/// the protocol-level distribution paths in this module.
+///
+/// A test below verifies the bytes match the expected BLAKE3.
+pub const TREASURY_ADDRESS: Address = Address::from_hash(Hash::from_bytes([
+    0x4e, 0xad, 0x1b, 0xe0, 0xaa, 0xc9, 0x88, 0x8b,
+    0xc5, 0x96, 0x2c, 0xdc, 0x26, 0xd0, 0x26, 0xb7,
+    0x61, 0x9a, 0xe4, 0x81, 0x20, 0x04, 0xc9, 0x4e,
+    0xa0, 0x6f, 0xfb, 0xf2, 0xd7, 0xdc, 0x2a, 0x09,
+]));
 
 // ═══════════════════════════════════════════════════════════════════
 // STATE STRUCT
@@ -100,12 +119,10 @@ pub struct State {
     /// Total number of doctrine-block inscriptions. Drives the halving schedule.
     pub doctrine_count: u64,
 
-    /// Total $TFS issued (minted), in hyphae. Cannot exceed
-    /// [`crate::tx::MAX_SUPPLY_HYPHAE`].
-    pub supply_issued: u64,
-
-    /// Total $TFS burned, in hyphae. Monotonically increasing.
-    /// Circulating supply = `supply_issued - supply_burned`.
+    /// Total $TFS burned, in hyphae. Monotonically increasing. Burns
+    /// destroy tokens permanently — they do NOT return to treasury.
+    /// Circulating supply = MAX_SUPPLY_HYPHAE − supply_burned, and
+    /// equals the sum of `balances` (treasury + all citizen wallets).
     pub supply_burned: u64,
 
     /// Height of the last committed block. Genesis is 0.
@@ -116,10 +133,17 @@ pub struct State {
 }
 
 impl State {
-    /// Construct a fresh state (pre-genesis).
+    /// Construct a fresh genesis state.
+    ///
+    /// The treasury is credited with the full [`MAX_SUPPLY_HYPHAE`] at
+    /// genesis. Every subsequent Inscribe / Verify / Routing reward
+    /// flows FROM the treasury TO a citizen. No $TFS is ever minted
+    /// after this call — only transferred and burned.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let mut s = Self::default();
+        s.balances.insert(TREASURY_ADDRESS, MAX_SUPPLY_HYPHAE);
+        s
     }
 
     /// Return the balance (in hyphae) for an address. 0 if not present.
@@ -134,12 +158,23 @@ impl State {
         self.nonces.get(addr).copied().unwrap_or(0)
     }
 
-    /// Return the circulating supply in hyphae (issued minus burned).
+    /// Return the treasury's current balance in hyphae. This equals
+    /// "supply yet to be distributed to citizens" — a public, visible
+    /// indicator of how much $TFS remains for future inscriptions /
+    /// verifications / routing rewards.
+    #[must_use]
+    pub fn treasury_balance(&self) -> u64 {
+        self.balance(&TREASURY_ADDRESS)
+    }
+
+    /// Return the circulating supply in hyphae.
+    ///
+    /// All supply exists from genesis onward — 1 billion $TFS — held
+    /// partly by the treasury and partly by citizens. Burns permanently
+    /// destroy tokens. Circulating supply = total_minted − burned.
     #[must_use]
     pub const fn circulating_supply(&self) -> u64 {
-        // saturating_sub is defensive — supply_burned > supply_issued
-        // would be a bug, but we never want an underflow panic in a hot path.
-        self.supply_issued.saturating_sub(self.supply_burned)
+        MAX_SUPPLY_HYPHAE.saturating_sub(self.supply_burned)
     }
 
     /// Compute the current inscribe reward in hyphae, accounting for halvings.
@@ -166,8 +201,10 @@ impl State {
 
     /// Return the remaining mintable supply (in hyphae).
     #[must_use]
-    pub const fn remaining_supply(&self) -> u64 {
-        MAX_SUPPLY_HYPHAE.saturating_sub(self.supply_issued)
+    pub fn remaining_supply(&self) -> u64 {
+        // In Model B, "remaining supply" = treasury balance.
+        // (All supply exists from genesis; what's undistributed lives in treasury.)
+        self.treasury_balance()
     }
 
     /// Compute the canonical state root hash.
@@ -256,40 +293,22 @@ impl State {
             return Err(StateError::DuplicateInscription(p.doctrine_hash));
         }
 
-        // Compute reward for this inscription (halvings applied).
+        // Compute reward (halvings applied) and cap at treasury balance.
+        // If treasury is low, pay what it can. If treasury is empty, reward
+        // is 0 — the inscription still succeeds (the scroll is recorded
+        // on-chain forever) but no $TFS is distributed.
         let reward_raw = self.current_inscribe_reward();
+        let reward = reward_raw.min(self.treasury_balance());
 
-        // Cap at remaining supply.
-        let reward = reward_raw.min(self.remaining_supply());
+        // Transfer reward from treasury → inscriber.
+        self.distribute_from_treasury(p.inscriber, reward)?;
 
-        // Update supply issued.
-        let new_issued = self
-            .supply_issued
-            .checked_add(reward)
-            .ok_or(StateError::SupplyOverflow)?;
-        if new_issued > MAX_SUPPLY_HYPHAE {
-            // Should not happen given the `min(remaining_supply())` cap above,
-            // but defense in depth.
-            return Err(StateError::SupplyCapExceeded {
-                would_be: new_issued,
-                cap: MAX_SUPPLY_HYPHAE,
-            });
-        }
-
-        // Credit the inscriber.
-        let new_bal = self
-            .balance(&p.inscriber)
-            .checked_add(reward)
-            .ok_or(StateError::BalanceOverflow(p.inscriber))?;
-
-        // All checks passed. Commit.
+        // All checks passed. Commit doctrine record + count.
         self.inscribed_doctrines.insert(p.doctrine_hash);
         self.doctrine_count = self
             .doctrine_count
             .checked_add(1)
             .ok_or(StateError::DoctrineCountOverflow)?;
-        self.supply_issued = new_issued;
-        self.set_balance(p.inscriber, new_bal);
         Ok(())
     }
 
@@ -299,28 +318,47 @@ impl State {
             return Err(StateError::AlreadyVerified(p.verified));
         }
 
+        // Treasury-capped reward.
         let reward_raw = self.current_verify_reward();
-        let reward = reward_raw.min(self.remaining_supply());
+        let reward = reward_raw.min(self.treasury_balance());
 
-        let new_issued = self
-            .supply_issued
-            .checked_add(reward)
-            .ok_or(StateError::SupplyOverflow)?;
-        if new_issued > MAX_SUPPLY_HYPHAE {
-            return Err(StateError::SupplyCapExceeded {
-                would_be: new_issued,
-                cap: MAX_SUPPLY_HYPHAE,
-            });
-        }
-
-        let new_bal = self
-            .balance(&p.verified)
-            .checked_add(reward)
-            .ok_or(StateError::BalanceOverflow(p.verified))?;
+        // Transfer reward from treasury → verified citizen.
+        self.distribute_from_treasury(p.verified, reward)?;
 
         self.verified_citizens.insert(p.verified);
-        self.supply_issued = new_issued;
-        self.set_balance(p.verified, new_bal);
+        Ok(())
+    }
+
+    /// Transfer `amount` hyphae from [`TREASURY_ADDRESS`] to `recipient`.
+    /// This is the protocol-level distribution path used by Inscribe,
+    /// Verify, and (future) Routing rewards. No signature required
+    /// because the treasury has no private key.
+    ///
+    /// If `amount` is 0 this is a no-op (returns Ok). Treasury is assumed
+    /// to have at least `amount` available (caller caps via
+    /// [`Self::treasury_balance`] if needed).
+    fn distribute_from_treasury(
+        &mut self,
+        recipient: Address,
+        amount: u64,
+    ) -> Result<(), StateError> {
+        if amount == 0 {
+            return Ok(());
+        }
+        let treasury = self.treasury_balance();
+        let new_treasury = treasury
+            .checked_sub(amount)
+            .ok_or(StateError::TreasuryInsufficient {
+                available: treasury,
+                requested: amount,
+            })?;
+        let new_recipient = self
+            .balance(&recipient)
+            .checked_add(amount)
+            .ok_or(StateError::BalanceOverflow(recipient))?;
+
+        self.set_balance(TREASURY_ADDRESS, new_treasury);
+        self.set_balance(recipient, new_recipient);
         Ok(())
     }
 
@@ -455,17 +493,15 @@ pub enum StateError {
     #[error("balance overflow for {0}")]
     BalanceOverflow(Address),
 
-    /// Supply arithmetic overflowed.
-    #[error("supply counter overflow")]
-    SupplyOverflow,
-
-    /// Minting would exceed the hard cap.
-    #[error("supply cap exceeded: would be {would_be}, cap is {cap}")]
-    SupplyCapExceeded {
-        /// Computed value that exceeded the cap.
-        would_be: u64,
-        /// The cap (always 10^18 hyphae).
-        cap: u64,
+    /// Treasury doesn't have enough balance for the requested distribution.
+    /// Should never occur in practice because distribution callers cap
+    /// the amount at `treasury_balance()` before calling.
+    #[error("treasury insufficient: available {available}, requested {requested}")]
+    TreasuryInsufficient {
+        /// Current treasury balance.
+        available: u64,
+        /// Amount the distribution tried to draw.
+        requested: u64,
     },
 
     /// Burn counter would overflow `u64`.
@@ -522,6 +558,62 @@ mod tests {
     }
     fn addr(k: &Keypair) -> Address {
         Address::from_public_key(&k.public_key())
+    }
+
+    // ─── TREASURY constant integrity ────────────────────────────────
+
+    #[test]
+    fn treasury_address_matches_canonical_blake3() {
+        use crate::crypto::hash::hash_bytes;
+        let expected = Address::from_hash(hash_bytes(b"tfs-treasury-genesis-v1"));
+        assert_eq!(
+            TREASURY_ADDRESS, expected,
+            "TREASURY_ADDRESS const must equal BLAKE3(b\"tfs-treasury-genesis-v1\")"
+        );
+    }
+
+    #[test]
+    fn genesis_state_seeds_treasury_with_full_supply() {
+        let s = State::new();
+        assert_eq!(s.treasury_balance(), MAX_SUPPLY_HYPHAE);
+        assert_eq!(s.circulating_supply(), MAX_SUPPLY_HYPHAE);
+        assert_eq!(s.supply_burned, 0);
+    }
+
+    #[test]
+    fn supply_is_conserved_across_distributions() {
+        // Before and after any number of inscriptions, the sum of all
+        // balances (treasury + citizens) equals MAX_SUPPLY_HYPHAE.
+        let p1 = kp();
+        let p2 = kp();
+        let mut s = State::new();
+
+        let sum_of_all = |s: &State| -> u64 { s.balances.values().sum() };
+        assert_eq!(sum_of_all(&s), MAX_SUPPLY_HYPHAE);
+
+        // First inscription.
+        let stx1 = SignedTransaction::sign_single(
+            Transaction::Inscribe(InscribePayload::new(addr(&p1), b"scroll one".to_vec(), 0, 1)),
+            &p1,
+        )
+        .expect("sign 1");
+        s.apply_transaction(&stx1).expect("apply 1");
+        assert_eq!(sum_of_all(&s), MAX_SUPPLY_HYPHAE);
+
+        // Second inscription.
+        let stx2 = SignedTransaction::sign_single(
+            Transaction::Inscribe(InscribePayload::new(addr(&p2), b"scroll two".to_vec(), 0, 2)),
+            &p2,
+        )
+        .expect("sign 2");
+        s.apply_transaction(&stx2).expect("apply 2");
+        assert_eq!(sum_of_all(&s), MAX_SUPPLY_HYPHAE);
+
+        // Treasury decremented by exactly what citizens gained.
+        let expected_treasury = MAX_SUPPLY_HYPHAE - 2 * (1_000 * HYPHAE_PER_TFS);
+        assert_eq!(s.treasury_balance(), expected_treasury);
+        assert_eq!(s.balance(&addr(&p1)), 1_000 * HYPHAE_PER_TFS);
+        assert_eq!(s.balance(&addr(&p2)), 1_000 * HYPHAE_PER_TFS);
     }
 
     // ─── Halving math ───────────────────────────────────────────────
@@ -672,7 +764,11 @@ mod tests {
 
         s.apply_transaction(&stx).expect("apply");
         assert_eq!(s.balance(&addr(&president)), 1_000 * HYPHAE_PER_TFS);
-        assert_eq!(s.supply_issued, 1_000 * HYPHAE_PER_TFS);
+        // Treasury debited by exactly the distributed amount.
+        assert_eq!(
+            s.treasury_balance(),
+            MAX_SUPPLY_HYPHAE - (1_000 * HYPHAE_PER_TFS)
+        );
         assert_eq!(s.doctrine_count, 1);
         assert!(s.inscribed_doctrines.contains(&doctrine_hash));
     }
@@ -776,7 +872,6 @@ mod tests {
         let c = kp();
         let mut s = State::new();
         s.balances.insert(addr(&c), 500);
-        s.supply_issued = 500;
 
         let stx = SignedTransaction::sign_single(
             Transaction::Burn(BurnPayload {
@@ -793,7 +888,8 @@ mod tests {
 
         assert_eq!(s.balance(&addr(&c)), 300);
         assert_eq!(s.supply_burned, 200);
-        assert_eq!(s.circulating_supply(), 300);
+        // Circulating supply shrinks by the burn amount (under the 1B cap).
+        assert_eq!(s.circulating_supply(), MAX_SUPPLY_HYPHAE - 200);
     }
 
     #[test]
