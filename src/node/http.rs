@@ -48,7 +48,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Bytes,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -158,6 +158,39 @@ pub struct SigilResponse {
     pub sigil: String,
     /// The address bound to the sigil, bech32-encoded.
     pub address: String,
+}
+
+/// Query params for `GET /sigils`.
+#[derive(Deserialize)]
+pub struct SigilListQuery {
+    /// Pagination offset (default 0).
+    #[serde(default)]
+    pub offset: Option<u64>,
+    /// Max rows returned (default 100, max 500).
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+/// One row in the citizen roll.
+#[derive(Serialize, Deserialize)]
+pub struct SigilListEntry {
+    /// Citizen's chosen capitalization (display form).
+    pub sigil: String,
+    /// The address bound to the sigil.
+    pub address: String,
+}
+
+/// `GET /sigils` response body — the full citizen roll.
+#[derive(Serialize, Deserialize)]
+pub struct SigilListResponse {
+    /// Total number of sigils bound on the chain.
+    pub total: u64,
+    /// Offset used for this page.
+    pub offset: u64,
+    /// Row limit used for this page.
+    pub limit: u64,
+    /// Sigils in this page, sorted alphabetically by lowercase key.
+    pub sigils: Vec<SigilListEntry>,
 }
 
 /// One transaction inside a committed block, decoded for display.
@@ -282,6 +315,7 @@ pub fn build_router(state: SharedNodeState) -> Router {
         .route("/block/hash/:hex/summary", get(get_block_summary_by_hash))
         .route("/tx/:hex", get(get_tx_location))
         .route("/address/:bech32", get(get_address))
+        .route("/sigils", get(get_sigils))
         .route("/sigil/:name", get(get_sigil_by_name))
         .route("/sigil-by-address/:bech32", get(get_sigil_by_address))
         .route("/state/root", get(get_state_root))
@@ -534,6 +568,40 @@ async fn get_address(
         nonce: s.nonce(&addr),
         verified: s.verified_citizens.contains(&addr),
         sigil: s.sigil_of(&addr).cloned(),
+    }))
+}
+
+async fn get_sigils(
+    State(st): State<SharedNodeState>,
+    Query(q): Query<SigilListQuery>,
+) -> Result<Json<SigilListResponse>, ApiError> {
+    let offset = q.offset.unwrap_or(0);
+    let limit = q.limit.unwrap_or(100).min(500);
+
+    let guard = st.read().await;
+    let s = guard.chain.state();
+
+    // state.sigils iteration is already alphabetical (BTreeMap key = lowercase
+    // sigil). For each lowercase_key → address, look up the display form from
+    // sigil_of_address. Skip any inconsistencies silently.
+    let total = s.sigils.len() as u64;
+    let start = offset as usize;
+    let end = (start + limit as usize).min(s.sigils.len());
+    let mut rows = Vec::with_capacity(end.saturating_sub(start));
+    for (_lc_key, addr) in s.sigils.iter().skip(start).take(end.saturating_sub(start)) {
+        if let Some(display) = s.sigil_of(addr) {
+            rows.push(SigilListEntry {
+                sigil: display.clone(),
+                address: addr.to_bech32(),
+            });
+        }
+    }
+
+    Ok(Json(SigilListResponse {
+        total,
+        offset,
+        limit,
+        sigils: rows,
     }))
 }
 

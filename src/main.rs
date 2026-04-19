@@ -209,18 +209,17 @@ mod cli {
 
     async fn cmd_tx(args: &[String]) -> Result<()> {
         use tfs_chain::crypto::address::Address;
-        use tfs_chain::tx::{SignedTransaction, Transaction, TransferPayload};
+        use tfs_chain::tx::{
+            SigilBindPayload, SignedTransaction, Transaction, TransferPayload,
+        };
 
         let from_hex = flag(args, "--from-key").context("missing --from-key")?;
-        let to_bech32 = flag(args, "--to").context("missing --to")?;
-        let amount_str = flag(args, "--amount").context("missing --amount (hyphae)")?;
+        let tx_type = flag(args, "--type").unwrap_or_else(|| "transfer".to_string());
         let nonce_str = flag(args, "--nonce").context("missing --nonce")?;
         let rpc = flag(args, "--rpc").unwrap_or_else(|| "http://127.0.0.1:8080".to_string());
 
         let from_kp = parse_keypair_hex(&from_hex)?;
         let from_addr = Address::from_public_key(&from_kp.public_key());
-        let to_addr = Address::parse(&to_bech32).map_err(|e| anyhow!("bad --to: {e}"))?;
-        let amount: u64 = amount_str.parse().context("bad --amount")?;
         let nonce: u64 = nonce_str.parse().context("bad --nonce")?;
 
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -232,17 +231,35 @@ mod cli {
         )
         .unwrap_or(i64::MAX);
 
-        let stx = SignedTransaction::sign_single(
-            Transaction::Transfer(TransferPayload {
-                from: from_addr,
-                to: to_addr,
-                amount_hyphae: amount,
-                nonce,
-                timestamp_ms: ts,
-            }),
-            &from_kp,
-        )
-        .map_err(|e| anyhow!("sign: {e}"))?;
+        let tx = match tx_type.as_str() {
+            "transfer" => {
+                let to_bech32 = flag(args, "--to").context("missing --to (transfer)")?;
+                let amount_str = flag(args, "--amount")
+                    .context("missing --amount (hyphae, transfer)")?;
+                let to_addr = Address::parse(&to_bech32).map_err(|e| anyhow!("bad --to: {e}"))?;
+                let amount: u64 = amount_str.parse().context("bad --amount")?;
+                Transaction::Transfer(TransferPayload {
+                    from: from_addr,
+                    to: to_addr,
+                    amount_hyphae: amount,
+                    nonce,
+                    timestamp_ms: ts,
+                })
+            }
+            "sigil-bind" => {
+                let sigil = flag(args, "--sigil")
+                    .context("missing --sigil <name> (sigil-bind)")?;
+                Transaction::SigilBind(SigilBindPayload::new(sigil, from_addr, nonce, ts))
+            }
+            other => {
+                return Err(anyhow!(
+                    "unknown --type {other:?}. Supported: transfer, sigil-bind."
+                ));
+            }
+        };
+
+        let stx = SignedTransaction::sign_single(tx, &from_kp)
+            .map_err(|e| anyhow!("sign: {e}"))?;
 
         let bytes = stx.to_bytes().map_err(|e| anyhow!("encode: {e}"))?;
         let tx_id = stx.tx_id().map_err(|e| anyhow!("tx_id: {e}"))?;
